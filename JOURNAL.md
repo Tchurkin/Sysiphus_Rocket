@@ -17,3 +17,15 @@ created_at: 2024-06-06
 
 <img src="https://github.com/user-attachments/assets/f7a25402-e031-462b-b53e-2e56d85a7688" width="30%" height="30%">
 <img src="https://github.com/user-attachments/assets/d4dd71c1-8764-4b15-b5a8-0d080f379321" width="30%" height="30%">
+
+
+
+**6/9/25** - 2hr - Began reaction wheel assembly, I'm not planning on using it for roll stability in the first launch, but I will use it on the next one if necessary.
+
+<img src="https://github.com/user-attachments/assets/88af9159-2e43-4491-b572-5a71f75d89d5" width="30%" height="30%">
+
+
+
+**6/10/25** - 3hr - Tested pyro and continuity check circuit module PCB. It seems to be partially malfunctional. When the pyro is turned off, a very small current is supposed to pass through the pyro output to check continuity and turn on an LED, but this voltage is way too high, very close to the output voltage when turned on.
+
+<img src="https://github.com/user-attachments/assets/d827f7b4-b00c-4794-9ffd-46f2ca29dd15" width="30%" height="30%">
