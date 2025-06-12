@@ -29,3 +29,6 @@ created_at: 2024-06-06
 **6/10/25** - 3hr - Tested pyro and continuity check circuit module PCB. It seems to be partially malfunctional. When the pyro is turned off, a very small current is supposed to pass through the pyro output to check continuity and turn on an LED, but this voltage is way too high, very close to the output voltage when turned on.
 
 <img src="https://github.com/user-attachments/assets/d827f7b4-b00c-4794-9ffd-46f2ca29dd15" width="30%" height="30%">
+
+
+**6/12/25** - 4hr - Troubleshot pyro and continuity check circuit. I found a new circuit that should work better for checking continuity and is also much simpler, so I will probably order another prototype pyro module with these improvements soon.
