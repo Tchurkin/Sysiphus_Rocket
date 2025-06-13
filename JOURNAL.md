@@ -32,3 +32,5 @@ created_at: 2024-06-06
 
 
 **6/12/25** - 4hr - Troubleshot pyro and continuity check circuit. I found a new circuit that should work better for checking continuity and is also much simpler, so I will probably order another prototype pyro module with these improvements soon.
+
+<img src="https://github.com/user-attachments/assets/7ddfb0d9-fad5-4999-8aa9-6adba38b4ef7" width="30%" height="30%">
