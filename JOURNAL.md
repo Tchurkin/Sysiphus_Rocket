@@ -31,6 +31,12 @@ created_at: 2024-06-06
 <img src="https://github.com/user-attachments/assets/d827f7b4-b00c-4794-9ffd-46f2ca29dd15" width="30%" height="30%">
 
 
+
 **6/12/25** - 4hr - Troubleshot pyro and continuity check circuit. I found a new circuit that should work better for checking continuity and is also much simpler, so I will probably order another prototype pyro module with these improvements soon.
 
 <img src="https://github.com/user-attachments/assets/7ddfb0d9-fad5-4999-8aa9-6adba38b4ef7" width="30%" height="30%">
+
+
+
+**6/17/25** - 2hr - The next prototype for the pyro and continuity check circuit arrived today. I think my circuit is right, but the MOSFETs don't seem to be working. This is the stuff nightmares are made of. These prototypes are pretty expensive so failures are very not good.
+<img src="https://github.com/user-attachments/assets/867bc351-a2e9-4a82-ac6c-391210421bcd" width="30%" height="30%">
