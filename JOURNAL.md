@@ -43,3 +43,4 @@ created_at: 2024-06-06
 
 **6/19/25** - 2hr - I just found the issue that's been holding me up for a week. The drain and source on my pyro MOSFETs were backwards. The problem is that EasyEDA had the drain and source bindings from schematic to PCB view switched up. I did some more testing though with some trace cutting and jumper wires to flip them back and it sort of worked, but I think my solder connections were too bad. I ordered another test PCB and it should arrive in a few days.
 
+**6/24/25** - 1hr - I am now revisiting the code for the rocket. I haven't worked on it in a few months, so it's a little foreign right now. I'm trying to combine the sensor data from the IMU and baro to get a more accurate speed/altitude reading. I also transitioned to VScode from Arduino IDE.
