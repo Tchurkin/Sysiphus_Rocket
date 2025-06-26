@@ -41,6 +41,17 @@ created_at: 2024-06-06
 **6/17/25** - 2hr - The next prototype for the pyro and continuity check circuit arrived today. I think my circuit is right, but the MOSFETs don't seem to be working. This is the stuff nightmares are made of. These prototypes are pretty expensive so failures are very not good.
 <img src="https://github.com/user-attachments/assets/867bc351-a2e9-4a82-ac6c-391210421bcd" width="30%" height="30%">
 
-**6/19/25** - 2hr - I just found the issue that's been holding me up for a week. The drain and source on my pyro MOSFETs were backwards. The problem is that EasyEDA had the drain and source bindings from schematic to PCB view switched up. I did some more testing though with some trace cutting and jumper wires to flip them back and it sort of worked, but I think my solder connections were too bad. I ordered another test PCB and it should arrive in a few days.
+
+
+**6/19/25** - 2hr - I just found the issue that's been holding me up for a week. The drain and source on my pyro MOSFETs were backwards. The problem is that EasyEDA had the drain and source bindings from schematic to PCB view switched up. I did some more testing though with some trace cutting and jumper wires to flip them back and it sort of worked, but I think my solder connections were too bad to be sure. I ordered another test PCB and it should arrive in a few days.
+
+
 
 **6/24/25** - 1hr - I am now revisiting the code for the rocket. I haven't worked on it in a few months, so it's a little foreign right now. I'm trying to combine the sensor data from the IMU and baro to get a more accurate speed/altitude reading. I also transitioned to VScode from Arduino IDE.
+
+
+
+**6/25/25** - 1hr - the new pyro circuit prototype arrived today. It seems like the mosfet part works fine, but the low voltage was still too high (around 6.4V), so I replaced the 220 ohm resistor in front of the LED with a 10K and it seems to work pretty well. I'm hoping to order the full PCB very soon so I can launch ASAP.
+
+<img src="https://github.com/user-attachments/assets/fd43574b-a637-48a5-9388-11d8cc4a2abc" width="30%" height="30%">
+
