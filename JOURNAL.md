@@ -55,3 +55,8 @@ created_at: 2024-06-06
 
 <img src="https://github.com/user-attachments/assets/fd43574b-a637-48a5-9388-11d8cc4a2abc" width="30%" height="30%">
 
+
+**6/26/25** - 4hr - I'm working on the sensor fusion. The main challenge is dealing with drift, inaccuracies, and also I need to do some relatively hard math to find the total upward acceleration from the gyro angles and accelerometer readings for the rocket axes.
+
+
+**6/27/25** - 3hr - I decided not to do any fancy sensor fusion because I can't get the accelerometer to accurately integrate to altitude. I'm just going to use the raw values. However, I think it will be smart to incorporate some buffer for the descent motor ignition. I need to time how long it take my flight computer to ignite F15 motors and I also think my altitude reading will be lagging behind a little. I will roughly time the delay that both of these introduce and light the motor pyro a little sooner.
