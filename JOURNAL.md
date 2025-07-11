@@ -73,3 +73,6 @@ created_at: 2024-06-06
 
 <img src="https://github.com/user-attachments/assets/a250e04d-6709-49b0-804b-33b8258f60d2" width="40%" height="40%">
 
+**7/10/25** - 3hr - The PCBs i've been waiting for came today. The two protoboards I don't really care about right now, but the final board that's going to launch seems to be working almost perfectly. I hope to launch to test my TVC stability in a few days.
+
+**7/11/25** - 4hr - I'm just changing the code for the new board. I hope to launch tomorrow and also on monday.
