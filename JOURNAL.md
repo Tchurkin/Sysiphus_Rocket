@@ -76,3 +76,5 @@ created_at: 2024-06-06
 **7/10/25** - 3hr - The PCBs i've been waiting for came today. The two protoboards I don't really care about right now, but the final board that's going to launch seems to be working almost perfectly. I hope to launch to test my TVC stability in a few days.
 
 **7/11/25** - 4hr - I'm just changing the code for the new board. I hope to launch tomorrow and also on monday.
+
+**7/13/25** - 12hr - This log covers yesterday and today. I finally launched! Most of the parts worked, but I think the rocket was aerodynamically unstable, meaning even with TVC correction it pitched over quickly and spun out of control. A lot of the rocket was destroyed, but the landing legs, and upper section is okay. I am currently wiring up a new PCB and speed-printing new rocket parts. I'm not satisfied with today's launch, so I want to get in one more (hopefully tomorrow) before presenting at Open Sauce at the end of the week. I leave in two days though, so I need to be very quick.
