@@ -1,4 +1,3 @@
-#include <Arduino.h>             // REQUIRED FOR VSCODE PLATFORM.IO
 #include <SPI.h>                 // Include SPI library for SD communication
 #include <SD.h>                  // Include SD library for SD card operations
 #include <Wire.h>                // Include Wire library for I2C communication
