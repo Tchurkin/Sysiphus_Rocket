@@ -323,8 +323,8 @@ void TVC() {
   sensors();
   tiltX = constrain(P * gyro_x + D * ang_vel_x, -5, 5) * ServoXMult;
   tiltY = constrain(P * gyro_y + D * ang_vel_y, -5, 5) * ServoYMult;
-  servoX.write(-tiltX + 90 + Xtune);
-  servoY.write(-tiltY + 90 + Ytune);
+  servoX.write(-tiltX + 90);
+  servoY.write(-tiltY + 90);
   delay(5);
 }
 
