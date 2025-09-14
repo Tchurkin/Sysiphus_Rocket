@@ -32,7 +32,7 @@ Adafruit_Sensor *dps_pressure = dps.getPressureSensor();
 
 // --- Constants ---
 const double ServoXMult = 4, ServoYMult = 4;
-const double P = 0.2, D = 0.1;
+const double P = 0.3, D = 0.2;
 const double burnTime = 3.45; // seconds
 const double avThrust = 14.34; // N
 const double rocketWeight = 0.85; // kg
