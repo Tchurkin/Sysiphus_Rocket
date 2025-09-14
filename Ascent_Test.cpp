@@ -139,7 +139,7 @@ void sensors() {
   accel_z = linearAccelData.acceleration.z;
 
   float gyro_alpha = 0.9;
-  float ang_vel_alpha = 0.2;
+  float ang_vel_alpha = 0.4;
   // Smoothing Filter
   gyro_x = gyro_alpha * raw_gyro_x + (1 - gyro_alpha) * gyro_x;
   gyro_y = gyro_alpha * raw_gyro_y + (1 - gyro_alpha) * gyro_y;
@@ -282,7 +282,7 @@ bool buttonCount() {
 }
 
 void countdown() {
-  const unsigned long countdownDuration = 10;
+  const unsigned long countdownDuration = 30;
   servoX.write(90 + Xtune);
   servoY.write(90 + Ytune);
 
