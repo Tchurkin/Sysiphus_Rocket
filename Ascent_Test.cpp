@@ -32,7 +32,7 @@ Adafruit_Sensor *dps_pressure = dps.getPressureSensor();
 
 // --- Constants ---
 const double ServoXMult = 4, ServoYMult = 4;
-const double P = 0.3, D = 0.2;
+const double P = 0.4, D = 0.3;
 const double burnTime = 3.45; // seconds
 const double avThrust = 14.34; // N
 const double rocketWeight = 0.85; // kg
@@ -139,7 +139,7 @@ void sensors() {
   accel_z = linearAccelData.acceleration.z;
 
   float gyro_alpha = 0.9;
-  float ang_vel_alpha = 0.4;
+  float ang_vel_alpha = 0.9;
   // Smoothing Filter
   gyro_x = gyro_alpha * raw_gyro_x + (1 - gyro_alpha) * gyro_x;
   gyro_y = gyro_alpha * raw_gyro_y + (1 - gyro_alpha) * gyro_y;
@@ -160,7 +160,7 @@ void sensors() {
 
   long currentTime = millis();
   long elapsedTime = currentTime - prevTime;
-  if (elapsedTime >= 10) {
+  if (elapsedTime >= 50) {
     float raw_vert_vel = (altitude - prev_alt) / (elapsedTime / 1000.0);
     vert_vel = 0.2 * raw_vert_vel + 0.8 * vert_vel;
     prev_alt = altitude;
@@ -325,7 +325,6 @@ void TVC() {
   tiltY = constrain(P * gyro_y + D * ang_vel_y, -5, 5) * ServoYMult;
   servoX.write(tiltX + 90);
   servoY.write(tiltY + 90);
-  delay(5);
 }
 
 void descent() {
