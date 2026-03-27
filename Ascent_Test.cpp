@@ -11,7 +11,7 @@ constexpr int button = 14;                 // Button for input
 constexpr int buzzer = 13;                // Buzzer for audio
 constexpr int P1 = 9;                     // Ignition for primary stage
 constexpr int P2 = 10;                     // Ignition for secondary stage
-constexpr int P3 = 11;                     // Melt wire for landing leg deployment
+constexpr int P3 = 11;                     // Melt wire for streamer deployment
 constexpr int P4 = 12;                    // Melt wire for parachute ejection
 constexpr int RLED = 6;
 constexpr int GLED = 7;
@@ -35,7 +35,7 @@ const double ServoXMult = 4, ServoYMult = 4;
 const double P = 0.4, D = 0.3;
 const double burnTime = 3.45; // seconds
 const double avThrust = 14.34; // N
-const double rocketWeight = 0.85; // kg
+const double rocketWeight = 0.7; // kg
 const double G = 9.81; // ms^2
 const double ignitionDelay = 0.2; // seconds
 const double delayDrop = 0.5 * G * ignitionDelay * ignitionDelay;
@@ -99,7 +99,7 @@ void setup() {
 
   LED(false, false, false);
 
-  Serial.begin(9600);
+  Serial.begin(115200);
 
   Wire.begin();
   if (!bno.begin()) {
@@ -233,9 +233,9 @@ void emergency() {
     servoY.write(90 + Ytune);
     Serial.println("EMERGENCY");
     LED(true,false,false);
-    triggerPyro(P4);
+    triggerPyro(P4);  // deploy parachute
     delay(1000);
-    triggerPyro(P3);
+    triggerPyro(P3);  // deploy streamer
     while (1) {
       updatePyros();
       beep(500, 50);
@@ -323,8 +323,8 @@ void TVC() {
   sensors();
   tiltX = constrain(P * gyro_x + D * ang_vel_x, -5, 5) * ServoXMult;
   tiltY = constrain(P * gyro_y + D * ang_vel_y, -5, 5) * ServoYMult;
-  servoX.write(tiltX + 90);
-  servoY.write(tiltY + 90);
+  servoX.write(tiltX + 90 + Xtune);
+  servoY.write(tiltY + 90 + Ytune);
 }
 
 void descent() {
@@ -349,11 +349,26 @@ void loop() {
   while (!buttonCount()) delay(50);
   delay(500);
   countdown();
+  unsigned long launchTime = millis();
   LED(true,true,false);
-  while (altitude > highest_alt - 1) TVC();
+  while (altitude > highest_alt - 1) {
+    if (millis() - launchTime < (burnTime + ignitionDelay) * 1000) {
+      TVC();
+    } else {
+      sensors();
+      servoX.write(90 + Xtune);
+      servoY.write(90 + Ytune);
+    }
+  }
   beep(659, 100); beep(523, 100); beep(659, 100);
   LED(false,true,true);
+  triggerPyro(P3);  // deploy streamer at apogee
+
+  // deploy parachute at 75% of apogee altitude on the way down
+  float chuteAlt = highest_alt * 0.75;
+  while (altitude > chuteAlt) sensors();
   triggerPyro(P4);
+
   // descent();
   LED(true,true,true);
   Serial.println("LANDED");
