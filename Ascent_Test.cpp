@@ -2,9 +2,8 @@
 #include <SD.h>
 #include <Wire.h>
 #include <PWMServo.h>
-#include <Adafruit_BNO055.h>
-#include <Adafruit_DPS310.h>
-#include <Adafruit_Sensor.h>
+#include <MPU6050_tockn.h>
+#include <Adafruit_BMP280.h>
 
 // Pin definitions
 constexpr int button = 14;                 // Button for input
@@ -19,16 +18,15 @@ constexpr int BLED = 8;
 const int chipSelect = BUILTIN_SDCARD;
 
 // --- Servo and Gyro Calibration ---
+// NOTE: axis signs may need flipping depending on MPU6050 mounting orientation
 const float Xtune = 1, Ytune = 0;
 PWMServo servoX, servoY; // Servo objects for thrust vector control (TVC)
 
 File logFile;  // SD log file object
 
 // --- IMU and Baro ---
-Adafruit_BNO055 bno = Adafruit_BNO055(55);
-Adafruit_DPS310 dps;
-Adafruit_Sensor *dps_temp = dps.getTemperatureSensor();
-Adafruit_Sensor *dps_pressure = dps.getPressureSensor();
+MPU6050 mpu6050(Wire);
+Adafruit_BMP280 bmp;
 
 // --- Constants ---
 const double ServoXMult = 4, ServoYMult = 4;
@@ -102,19 +100,18 @@ void setup() {
   Serial.begin(115200);
 
   Wire.begin();
-  if (!bno.begin()) {
-    Serial.println("BNO055 not found");
-    while (1);
-  }
 
-  if (!dps.begin_I2C()) {
-    Serial.println("DPS310 not found");
+  if (!bmp.begin(0x76)) {
+    Serial.println("BMP280 not found");
     while (1);
   }
-  dps.configurePressure(DPS310_64HZ, DPS310_64SAMPLES);
-  dps.configureTemperature(DPS310_64HZ, DPS310_64SAMPLES);
-  dps_temp->printSensorDetails();
-  dps_pressure->printSensorDetails();
+  bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,
+                  Adafruit_BMP280::SAMPLING_X2,
+                  Adafruit_BMP280::SAMPLING_X16,
+                  Adafruit_BMP280::FILTER_X16,
+                  Adafruit_BMP280::STANDBY_MS_1);
+
+  mpu6050.begin();
 
   // Initialize SD card
   SD.begin(chipSelect);
@@ -124,19 +121,23 @@ void sensors() {
   static long prevTime = millis();
   static float prev_alt;
 
-  sensors_event_t orientationData, angVelData, linearAccelData;
-  bno.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);
-  bno.getEvent(&angVelData, Adafruit_BNO055::VECTOR_GYROSCOPE);
-  bno.getEvent(&linearAccelData, Adafruit_BNO055::VECTOR_ACCELEROMETER);
+  mpu6050.update();
 
-  raw_gyro_x = orientationData.orientation.z + Xtune;
-  raw_gyro_y = orientationData.orientation.y + Ytune;
-  raw_gyro_z = orientationData.orientation.x;
-  raw_ang_vel_x = -angVelData.gyro.x * (180.0 / PI);
-  raw_ang_vel_y = -angVelData.gyro.y * (180.0 / PI);
-  accel_x = linearAccelData.acceleration.x;
-  accel_y = linearAccelData.acceleration.y;
-  accel_z = linearAccelData.acceleration.z;
+  // MPU6050_tockn gives angles in degrees (integrated gyro) and gyro in deg/s
+  // Map axes to match rocket orientation — swap/negate if TVC corrects wrong way
+  raw_gyro_x = mpu6050.getAngleX() + Xtune;
+  raw_gyro_y = mpu6050.getAngleY() + Ytune;
+  raw_gyro_z = mpu6050.getAngleZ();
+  raw_ang_vel_x = mpu6050.getGyroX();   // deg/s, already — no *180/PI needed
+  raw_ang_vel_y = mpu6050.getGyroY();
+
+  accel_x = mpu6050.getAccX() * G;
+  accel_y = mpu6050.getAccY() * G;
+  accel_z = mpu6050.getAccZ() * G;
+
+  temp = mpu6050.getTemp();
+
+  altitude = bmp.readAltitude(1013.25) - initial_alt;
 
   float gyro_alpha = 0.9;
   float ang_vel_alpha = 0.9;
@@ -147,17 +148,6 @@ void sensors() {
   ang_vel_x = ang_vel_alpha * raw_ang_vel_x + (1 - ang_vel_alpha) * ang_vel_x;
   ang_vel_y = ang_vel_alpha * raw_ang_vel_y + (1 - ang_vel_alpha) * ang_vel_y;
 
-  sensors_event_t temp_event, pressure_event;
-  if (dps.temperatureAvailable()) {
-    dps_temp->getEvent(&temp_event);
-    temp = temp_event.temperature;
-  }
-
-  if (dps.pressureAvailable()) {
-    dps_pressure->getEvent(&pressure_event);
-    altitude = (44330.0 * (1.0 - pow(pressure_event.pressure / 1013.25, 0.1903))) - initial_alt;
-  }
-
   long currentTime = millis();
   long elapsedTime = currentTime - prevTime;
   if (elapsedTime >= 50) {
@@ -166,7 +156,6 @@ void sensors() {
     prev_alt = altitude;
     prevTime = currentTime;
 
-    // Log data every 10ms here
     logData();
   }
 
@@ -303,15 +292,11 @@ void countdown() {
     } else {
       Serial.println(i);
       LED(true,false,true);
+      // Calibrate before buzzer — vibration from tone corrupts gyro samples
+      mpu6050.calcGyroOffsets(true, 0, 0);
+      initial_alt = bmp.readAltitude(1013.25);
+      Serial.println(initial_alt);
       tone(buzzer, 880);
-      delay(1000);
-      sensors_event_t pressure_event;
-      if (dps.pressureAvailable()) {
-        dps_pressure->getEvent(&pressure_event);
-        float initial_pressure = pressure_event.pressure;
-        initial_alt = 44330.0 * (1.0 - pow(initial_pressure / 1013.25, 0.1903));
-      }
-      noTone(buzzer);
     }
   }
 
