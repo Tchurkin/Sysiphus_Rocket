@@ -40,7 +40,7 @@ apogee_t   = t[apogee_idx]
 apogee_alt = df["Altitude(m)"][apogee_idx]
 
 # Chute: first point after apogee where altitude < 75% of apogee
-chute_mask = (t > apogee_t) & (df["Altitude(m)"] < apogee_alt * 0.75)
+chute_mask = (t > apogee_t) & (df["Altitude(m)"] < apogee_alt * 0.65)
 chute_t    = t[chute_mask].iloc[0] if chute_mask.any() else None
 
 # Emergency: any gyro > 90 deg
@@ -93,7 +93,7 @@ ax1.set_title("Altitude")
 ax1.set_ylabel("m")
 ax1.set_xlabel("Time (s)")
 draw_events(ax1, show_labels=True)
-ax1.axhline(apogee_alt * 0.75, color="blue", linestyle=":", linewidth=1, alpha=0.5, label="Chute trigger alt")
+ax1.axhline(apogee_alt * 0.65, color="blue", linestyle=":", linewidth=1, alpha=0.5, label="Chute trigger alt")
 ax1.legend(fontsize=7)
 
 # 2. Vertical velocity

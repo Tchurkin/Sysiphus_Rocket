@@ -5,54 +5,58 @@
 #include <MPU6050_tockn.h>
 #include <Adafruit_BMP280.h>
 
-// Pin definitions
-constexpr int button = 14;                 // Button for input
-constexpr int buzzer = 13;                // Buzzer for audio
-constexpr int P1 = 9;                     // Ignition for primary stage
-constexpr int P2 = 10;                     // Ignition for secondary stage
-constexpr int P3 = 11;                     // Melt wire for streamer deployment
-constexpr int P4 = 12;                    // Melt wire for parachute ejection
-constexpr int RLED = 6;
-constexpr int GLED = 7;
-constexpr int BLED = 8;
-const int chipSelect = BUILTIN_SDCARD;
+// ── Pins ─────────────────────────────────────────────────────────────────────
+constexpr int BUTTON   = 14;
+constexpr int BUZZER   = 13;
+constexpr int P1       = 9;   // Streamer melt wire
+constexpr int P2       = 10;  // Not connected
+constexpr int P3       = 11;  // Ascent motor ignition
+constexpr int P4       = 12;  // Parachute melt wire
+constexpr int RLED     = 6;
+constexpr int GLED     = 7;
+constexpr int BLED     = 8;
+constexpr int SD_CS    = BUILTIN_SDCARD;
 
-// --- Servo and Gyro Calibration ---
-// NOTE: axis signs may need flipping depending on MPU6050 mounting orientation
-const float Xtune = 1, Ytune = 0;
-PWMServo servoX, servoY; // Servo objects for thrust vector control (TVC)
+// ── Tuning ───────────────────────────────────────────────────────────────────
+constexpr float XTUNE  = 0, YTUNE = 0;   // Servo neutral trim (degrees)
 
-File logFile;  // SD log file object
+// ── PD Controller & TVC ──────────────────────────────────────────────────────
+constexpr float P_GAIN      = 0.3;
+constexpr float D_GAIN      = 0.2;
+constexpr float SERVO_X_MULT = 4;
+constexpr float SERVO_Y_MULT = 4;
+constexpr float MAX_TILT     = 5;        // degrees, TVC deflection limit
 
-// --- IMU and Baro ---
-MPU6050 mpu6050(Wire);
+// ── Motor & Flight Constants ──────────────────────────────────────────────────
+constexpr float BURN_TIME      = 3.45;   // s
+constexpr float AV_THRUST      = 14.34;  // N
+constexpr float ROCKET_WEIGHT  = 0.78;    // kg
+constexpr float G              = 9.81;   // m/s²
+constexpr float IGN_DELAY      = 0.2;    // s, motor ignition lag
+constexpr float SEA_LEVEL_HPA  = 1013.25;
+
+// ── Sensor Smoothing ─────────────────────────────────────────────────────────
+constexpr float GYRO_ALPHA    = 0.9;
+constexpr float ANGVEL_ALPHA  = 0.9;
+constexpr float VEL_ALPHA     = 0.2;     // weight on new velocity sample
+
+// ── Hardware ─────────────────────────────────────────────────────────────────
+PWMServo        servoX, servoY;
+MPU6050         mpu6050(Wire);
 Adafruit_BMP280 bmp;
+File            logFile;
+char            logFilename[20];
 
-// --- Constants ---
-const double ServoXMult = 4, ServoYMult = 4;
-const double P = 0.4, D = 0.3;
-const double burnTime = 3.45; // seconds
-const double avThrust = 14.34; // N
-const double rocketWeight = 0.7; // kg
-const double G = 9.81; // ms^2
-const double ignitionDelay = 0.2; // seconds
-const double delayDrop = 0.5 * G * ignitionDelay * ignitionDelay;
-const double deltaAlt = 0.5 * ((avThrust / rocketWeight) - G) * burnTime * burnTime - delayDrop; // delta alt
-
-// --- Flight Variables ---
-float temp, altitude, initial_alt, highest_alt, vert_vel;
-float raw_gyro_x, raw_gyro_y, raw_gyro_z, raw_ang_vel_x, raw_ang_vel_y; // raw
-float gyro_x, gyro_y, gyro_z, ang_vel_x, ang_vel_y; // filtered
+// ── Flight State ─────────────────────────────────────────────────────────────
+float altitude, initial_alt, highest_alt, vert_vel;
+float gyro_x, gyro_y, gyro_z;
+float ang_vel_x, ang_vel_y;
 float accel_x, accel_y, accel_z;
-float servo_tiltX, servo_tiltY;
 float tiltX, tiltY;
+bool  poweredFlight = false;  // true only during motor burn — gates emergency deploy
 
-// --- Pyro Control ---
-struct PyroChannel {
-  int pin;
-  bool active;
-  unsigned long startTime;
-};
+// ── Pyro System ──────────────────────────────────────────────────────────────
+struct PyroChannel { int pin; bool active; unsigned long startTime; };
 
 PyroChannel pyros[] = {
   {P1, false, 0},
@@ -62,49 +66,239 @@ PyroChannel pyros[] = {
 };
 
 void triggerPyro(int pin) {
-  for (int i = 0; i < 4; i++) {
-    if (pyros[i].pin == pin && !pyros[i].active) {
+  for (auto& ch : pyros) {
+    if (ch.pin == pin && !ch.active) {
       digitalWrite(pin, HIGH);
-      pyros[i].active = true;
-      pyros[i].startTime = millis();
+      ch.active    = true;
+      ch.startTime = millis();
     }
   }
 }
 
 void updatePyros() {
-  for (int i = 0; i < 4; i++) {
-    if (pyros[i].active && millis() - pyros[i].startTime >= 1000) {
-      digitalWrite(pyros[i].pin, LOW);
-      pyros[i].active = false;
+  for (auto& ch : pyros) {
+    if (ch.active && millis() - ch.startTime >= 1000) {
+      digitalWrite(ch.pin, LOW);
+      ch.active = false;
     }
   }
 }
 
+// ── Utilities ────────────────────────────────────────────────────────────────
+void LED(bool r, bool g, bool b) {
+  digitalWrite(RLED, !r);
+  digitalWrite(GLED, !g);
+  digitalWrite(BLED, !b);
+}
 
+void beep(int freq, int dur) {
+  tone(BUZZER, freq);
+  delay(dur);
+  noTone(BUZZER);
+}
+
+// ── SD Logging ───────────────────────────────────────────────────────────────
+void createUniqueLogFile() {
+  int idx = 0;
+  do { sprintf(logFilename, "LOG%03d.CSV", idx++); }
+  while (SD.exists(logFilename) && idx < 1000);
+
+  logFile = SD.open(logFilename, FILE_WRITE);
+  if (logFile) {
+    Serial.print(F("Logging to: ")); Serial.println(logFilename);
+    logFile.println(F("Time(ms),Altitude(m),VertVel(m/s),"
+                      "GyroX,GyroY,GyroZ,AngVelX,AngVelY,"
+                      "AccelX,AccelY,AccelZ,ServoX,ServoY"));
+    logFile.close();
+  } else {
+    Serial.println(F("Failed to create log file!"));
+  }
+}
+
+void logData() {
+  logFile = SD.open(logFilename, FILE_WRITE);
+  if (!logFile) return;
+  char buf[128];
+  snprintf(buf, sizeof(buf),
+    "%lu,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f",
+    millis(), altitude, vert_vel,
+    gyro_x, gyro_y, gyro_z,
+    ang_vel_x, ang_vel_y,
+    accel_x, accel_y, accel_z,
+    constrain(tiltX, -MAX_TILT, MAX_TILT),
+    constrain(tiltY, -MAX_TILT, MAX_TILT));
+  logFile.println(buf);
+  logFile.close();
+}
+
+// ── Sensors ───────────────────────────────────────────────────────────────────
+void sensors() {
+  static unsigned long prevTime = millis();
+  static float prev_alt = 0;
+
+  mpu6050.update();
+
+  // X axis negated to match rocket mounting orientation
+  float raw_gx  = -(mpu6050.getAngleX() + XTUNE);
+  float raw_gy  =   mpu6050.getAngleY() + YTUNE;
+  float raw_gz  =   mpu6050.getAngleZ();
+  float raw_avx = -mpu6050.getGyroX();
+  float raw_avy =  mpu6050.getGyroY();
+
+  gyro_x   = GYRO_ALPHA   * raw_gx  + (1 - GYRO_ALPHA)   * gyro_x;
+  gyro_y   = GYRO_ALPHA   * raw_gy  + (1 - GYRO_ALPHA)   * gyro_y;
+  gyro_z   = GYRO_ALPHA   * raw_gz  + (1 - GYRO_ALPHA)   * gyro_z;
+  ang_vel_x = ANGVEL_ALPHA * raw_avx + (1 - ANGVEL_ALPHA) * ang_vel_x;
+  ang_vel_y = ANGVEL_ALPHA * raw_avy + (1 - ANGVEL_ALPHA) * ang_vel_y;
+
+  accel_x = mpu6050.getAccX() * G;
+  accel_y = mpu6050.getAccY() * G;
+  accel_z = mpu6050.getAccZ() * G;
+
+  altitude = bmp.readAltitude(SEA_LEVEL_HPA) - initial_alt;
+  if (altitude > highest_alt) highest_alt = altitude;
+
+  unsigned long now     = millis();
+  unsigned long elapsed = now - prevTime;
+  if (elapsed >= 50) {
+    float raw_vel = (altitude - prev_alt) / (elapsed / 1000.0f);
+    vert_vel  = VEL_ALPHA * raw_vel + (1 - VEL_ALPHA) * vert_vel;
+    prev_alt  = altitude;
+    prevTime  = now;
+    logData();
+  }
+
+  updatePyros();
+  emergency();
+}
+
+// ── Emergency ─────────────────────────────────────────────────────────────────
+void emergency() {
+  if (!poweredFlight) return;                          // only active during motor burn
+  if (abs(gyro_x) <= 90 && abs(gyro_y) <= 90) return;
+
+  servoX.write(90 + XTUNE);
+  servoY.write(90 + YTUNE);
+  Serial.println(F("EMERGENCY"));
+  LED(true, false, false);
+  triggerPyro(P4);   // parachute first in emergency
+  delay(1000);
+  triggerPyro(P1);   // then streamer
+  while (true) {
+    updatePyros();
+    beep(500, 50);
+    delay(50);
+    if (digitalRead(BUTTON) == HIGH) while (true) updatePyros();
+  }
+}
+
+// ── Arm Sequence ─────────────────────────────────────────────────────────────
+bool buttonCount() {
+  constexpr int  PRESS_WINDOW  = 300;
+  constexpr int  PRESSES_REQD  = 5;
+  static unsigned long lastPress = 0;
+  static int pressCount = 0;
+
+  if (digitalRead(BUTTON) == HIGH) {
+    if (millis() - lastPress <= PRESS_WINDOW) {
+      pressCount++;
+      LED(false, true, false);
+      tone(BUZZER, 311.13f * pow(2.0f, pressCount / 12.0f));
+      while (digitalRead(BUTTON) == HIGH) {}
+      noTone(BUZZER);
+      LED(false, false, false);
+    } else {
+      pressCount = 1;
+    }
+    lastPress = millis();
+  }
+  return pressCount > PRESSES_REQD;
+}
+
+// ── Countdown & Launch ────────────────────────────────────────────────────────
+void countdown() {
+  constexpr int DURATION = 30;
+
+  servoX.write(90 + XTUNE);
+  servoY.write(90 + YTUNE);
+  createUniqueLogFile();
+
+  for (int i = DURATION; i > 0; i--) {
+    Serial.println(i);
+    if (i > 5) {
+      // Slow beep phase
+      LED(true, false, false);
+      beep(440, 200);
+      LED(false, false, false);
+      delay(800);
+    } else if (i > 3) {
+      // Solid tone phase
+      LED(true, false, false);
+      tone(BUZZER, 440);
+      delay(1000);
+    } else if (i == 3) {
+      // Purple + high tone = calibrating (rocket must be still and upright)
+      LED(true, false, true);
+      tone(BUZZER, 880);
+      mpu6050.calcGyroOffsets(true, 0, 0);
+      initial_alt = bmp.readAltitude(SEA_LEVEL_HPA);
+      Serial.print(F("  baseline alt: ")); Serial.println(initial_alt);
+      noTone(BUZZER);
+      LED(false, false, false);
+    }
+    // i=2, i=1 fall through — calibration already consumed the time
+  }
+
+  Serial.println(F("LAUNCH"));
+  triggerPyro(P3);
+}
+
+// ── TVC ───────────────────────────────────────────────────────────────────────
+void TVC() {
+  sensors();
+  tiltX = constrain(P_GAIN * gyro_x + D_GAIN * ang_vel_x, -MAX_TILT, MAX_TILT) * SERVO_X_MULT;
+  tiltY = constrain(P_GAIN * gyro_y + D_GAIN * ang_vel_y, -MAX_TILT, MAX_TILT) * SERVO_Y_MULT;
+  servoX.write(tiltX + 90 + XTUNE);
+  servoY.write(tiltY + 90 + YTUNE);
+}
+
+// ── Descent (disabled — landing legs not yet tested) ─────────────────────────
+void descent() {
+  constexpr float DELAY_DROP = 0.5f * G * IGN_DELAY * IGN_DELAY;
+  constexpr float DELTA_ALT  = 0.5f * ((AV_THRUST / ROCKET_WEIGHT) - G)
+                                * BURN_TIME * BURN_TIME - DELAY_DROP;
+  triggerPyro(P1);
+  servoX.write(90 + XTUNE);
+  servoY.write(90 + YTUNE);
+  while (altitude > DELTA_ALT) sensors();
+  triggerPyro(P2);  // not connected
+  LED(true, false, true);
+  unsigned long start = millis();
+  while (millis() - start < 3000) TVC();
+  triggerPyro(P4);
+  while (altitude > 0.5f || accel_z > 10 || vert_vel < -0.5f) TVC();
+  servoX.write(90 + XTUNE);
+  servoY.write(90 + YTUNE);
+}
+
+// ── Setup ─────────────────────────────────────────────────────────────────────
 void setup() {
-  pinMode(button, INPUT);
-  pinMode(buzzer, OUTPUT);
-  pinMode(P1, OUTPUT); pinMode(P2, OUTPUT); pinMode(P3, OUTPUT); pinMode(P4, OUTPUT);
+  pinMode(BUTTON, INPUT);
+  pinMode(BUZZER, OUTPUT);
   pinMode(RLED, OUTPUT); pinMode(GLED, OUTPUT); pinMode(BLED, OUTPUT);
-
-  digitalWrite(P1,LOW);
-  digitalWrite(P2,LOW);
-  digitalWrite(P3,LOW);
-  digitalWrite(P4,LOW);
+  pinMode(P1, OUTPUT); pinMode(P2, OUTPUT); pinMode(P3, OUTPUT); pinMode(P4, OUTPUT);
+  digitalWrite(P1, LOW); digitalWrite(P2, LOW); digitalWrite(P3, LOW); digitalWrite(P4, LOW);
 
   servoX.attach(3);
   servoY.attach(4);
+  servoX.write(90 + XTUNE);
+  servoY.write(90 + YTUNE);
 
   LED(false, false, false);
-
   Serial.begin(115200);
-
   Wire.begin();
 
-  if (!bmp.begin(0x76)) {
-    Serial.println("BMP280 not found");
-    while (1);
-  }
+  if (!bmp.begin(0x76)) { Serial.println(F("BMP280 not found")); while (true); }
   bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,
                   Adafruit_BMP280::SAMPLING_X2,
                   Adafruit_BMP280::SAMPLING_X16,
@@ -112,256 +306,51 @@ void setup() {
                   Adafruit_BMP280::STANDBY_MS_1);
 
   mpu6050.begin();
-
-  // Initialize SD card
-  SD.begin(chipSelect);
+  SD.begin(SD_CS);
 }
 
-void sensors() {
-  static long prevTime = millis();
-  static float prev_alt;
-
-  mpu6050.update();
-
-  // MPU6050_tockn gives angles in degrees (integrated gyro) and gyro in deg/s
-  // Map axes to match rocket orientation — swap/negate if TVC corrects wrong way
-  raw_gyro_x = mpu6050.getAngleX() + Xtune;
-  raw_gyro_y = mpu6050.getAngleY() + Ytune;
-  raw_gyro_z = mpu6050.getAngleZ();
-  raw_ang_vel_x = mpu6050.getGyroX();   // deg/s, already — no *180/PI needed
-  raw_ang_vel_y = mpu6050.getGyroY();
-
-  accel_x = mpu6050.getAccX() * G;
-  accel_y = mpu6050.getAccY() * G;
-  accel_z = mpu6050.getAccZ() * G;
-
-  temp = mpu6050.getTemp();
-
-  altitude = bmp.readAltitude(1013.25) - initial_alt;
-
-  float gyro_alpha = 0.9;
-  float ang_vel_alpha = 0.9;
-  // Smoothing Filter
-  gyro_x = gyro_alpha * raw_gyro_x + (1 - gyro_alpha) * gyro_x;
-  gyro_y = gyro_alpha * raw_gyro_y + (1 - gyro_alpha) * gyro_y;
-  gyro_z = gyro_alpha * raw_gyro_z + (1 - gyro_alpha) * gyro_z;
-  ang_vel_x = ang_vel_alpha * raw_ang_vel_x + (1 - ang_vel_alpha) * ang_vel_x;
-  ang_vel_y = ang_vel_alpha * raw_ang_vel_y + (1 - ang_vel_alpha) * ang_vel_y;
-
-  long currentTime = millis();
-  long elapsedTime = currentTime - prevTime;
-  if (elapsedTime >= 50) {
-    float raw_vert_vel = (altitude - prev_alt) / (elapsedTime / 1000.0);
-    vert_vel = 0.2 * raw_vert_vel + 0.8 * vert_vel;
-    prev_alt = altitude;
-    prevTime = currentTime;
-
-    logData();
-  }
-
-  if (altitude > highest_alt) highest_alt = altitude;
-  updatePyros();
-  emergency();
-}
-
-char filename[20];
-
-void createUniqueLogFile() {
-  int fileIndex = 0;
-  do {
-    sprintf(filename, "LOG%03d.CSV", fileIndex++);
-  } while (SD.exists(filename) && fileIndex < 1000);
-
-  logFile = SD.open(filename, FILE_WRITE);
-  if (logFile) {
-    Serial.print("Logging to: ");
-    Serial.println(filename);
-    logFile.println("Time(ms),Altitude(m),VertVel(m/s),GyroX,GyroY,GyroZ,AngVelX,AngVelY,AccelX,AccelY,AccelZ,ServoX,ServoY");
-    logFile.close();
-  } else {
-    Serial.println("Failed to create log file!");
-  }
-}
-
-void logData() {
-  logFile = SD.open(filename, FILE_WRITE);
-  if (logFile) {
-    // Format CSV line with relevant data
-    logFile.print(millis());
-    logFile.print(",");
-    logFile.print(altitude);
-    logFile.print(",");
-    logFile.print(vert_vel);
-    logFile.print(",");
-    logFile.print(gyro_x);
-    logFile.print(",");
-    logFile.print(gyro_y);
-    logFile.print(",");
-    logFile.print(gyro_z);
-    logFile.print(",");
-    logFile.print(ang_vel_x);
-    logFile.print(",");
-    logFile.print(ang_vel_y);
-    logFile.print(",");
-    logFile.print(accel_x);
-    logFile.print(",");
-    logFile.print(accel_y);
-    logFile.print(",");
-    logFile.print(accel_z);
-    logFile.print(",");
-    logFile.print(constrain(tiltX, -5, 5));
-    logFile.print(",");
-    logFile.println(constrain(tiltY, -5, 5));
-    logFile.close();
-  }
-}
-
-void emergency() {
-  if (abs(gyro_x) > 90 || abs(gyro_y) > 90) {
-    servoX.write(90 + Xtune);
-    servoY.write(90 + Ytune);
-    Serial.println("EMERGENCY");
-    LED(true,false,false);
-    triggerPyro(P4);  // deploy parachute
-    delay(1000);
-    triggerPyro(P3);  // deploy streamer
-    while (1) {
-      updatePyros();
-      beep(500, 50);
-      delay(50);
-      if (digitalRead(button) == HIGH) while (1) updatePyros();
-    }
-  }
-}
-
-void beep(int frequency, int duration) {
-  tone(buzzer, frequency);
-  delay(duration);
-  noTone(buzzer);
-}
-
-void LED(bool red, bool green, bool blue) {
-  digitalWrite(RLED, !red);
-  digitalWrite(GLED, !green);
-  digitalWrite(BLED, !blue);
-}
-
-bool buttonCount() {
-  const int pressWindow = 300;
-  static unsigned long lastPressTime = 0;
-  static int pressCount = 0;
-
-  bool buttonState = digitalRead(button);
-
-  if (buttonState == HIGH) {
-    if (millis() - lastPressTime <= pressWindow) {
-      pressCount++;
-      LED(false,true,false);
-      tone(buzzer, 311.13 * pow(2, float(pressCount) / 12.0));
-      while (digitalRead(button) == HIGH) {}
-      noTone(buzzer);
-      LED(false,false,false);
-    } else {
-      pressCount = 1;
-    }
-    lastPressTime = millis();
-  }
-
-  return (pressCount > 5);
-}
-
-void countdown() {
-  const unsigned long countdownDuration = 30;
-  servoX.write(90 + Xtune);
-  servoY.write(90 + Ytune);
-
-  createUniqueLogFile();
-
-  for (int i = countdownDuration; i > 0; i--) {
-    if (i > 5) {
-      Serial.println(i);
-      LED(true,false,false);
-      beep(440, 200);
-      LED(false,false,false);
-      delay(800);
-    } else if (i > 1) {
-      Serial.println(i);
-      LED(true,false,false);
-      tone(buzzer, 440);
-      delay(1000);
-    } else {
-      Serial.println(i);
-      LED(true,false,true);
-      // Calibrate before buzzer — vibration from tone corrupts gyro samples
-      mpu6050.calcGyroOffsets(true, 0, 0);
-      initial_alt = bmp.readAltitude(1013.25);
-      Serial.println(initial_alt);
-      tone(buzzer, 880);
-    }
-  }
-
-  Serial.println(F("LAUNCH"));
-  triggerPyro(P1);
-}
-
-void TVC() {
-  sensors();
-  tiltX = constrain(P * gyro_x + D * ang_vel_x, -5, 5) * ServoXMult;
-  tiltY = constrain(P * gyro_y + D * ang_vel_y, -5, 5) * ServoYMult;
-  servoX.write(tiltX + 90 + Xtune);
-  servoY.write(tiltY + 90 + Ytune);
-}
-
-void descent() {
-  triggerPyro(P3);
-  servoX.write(90 + Xtune);
-  servoY.write(90 + Ytune);
-  while (altitude > deltaAlt) sensors();
-  triggerPyro(P2);
-  LED(true,false,true);
-  long start = millis();
-  while (millis() - start < 3000) TVC();
-  triggerPyro(P4);
-  while (altitude > 0.5 || accel_z > 10 || vert_vel < -0.5) TVC();
-  servoX.write(90 + Xtune);
-  servoY.write(90 + Ytune);
-}
-
+// ── Main Loop ─────────────────────────────────────────────────────────────────
 void loop() {
-  LED(true,true,true);
-  delay(500);
-  LED(false,false,false);
+  // ── Arm ──
+  LED(true, true, true); delay(500); LED(false, false, false);
   while (!buttonCount()) delay(50);
   delay(500);
   countdown();
+
+  // ── Ascent ──
   unsigned long launchTime = millis();
-  LED(true,true,false);
+  LED(true, true, false);
+  poweredFlight = true;
   while (altitude > highest_alt - 1) {
-    if (millis() - launchTime < (burnTime + ignitionDelay) * 1000) {
+    if (millis() - launchTime < (BURN_TIME + IGN_DELAY) * 1000) {
       TVC();
     } else {
+      poweredFlight = false;   // burnout — emergency deploy disabled from here on
       sensors();
-      servoX.write(90 + Xtune);
-      servoY.write(90 + Ytune);
+      servoX.write(90 + XTUNE);
+      servoY.write(90 + YTUNE);
     }
   }
+  poweredFlight = false;
+
+  // ── Apogee ──
   beep(659, 100); beep(523, 100); beep(659, 100);
-  LED(false,true,true);
-  triggerPyro(P3);  // deploy streamer at apogee
+  LED(false, true, true);
+  triggerPyro(P1);   // streamer at 1m below apogee
 
-  // deploy parachute at 75% of apogee altitude on the way down
-  float chuteAlt = highest_alt * 0.75;
+  // ── Descent ──
+  float chuteAlt = highest_alt * 0.65f;
   while (altitude > chuteAlt) sensors();
-  triggerPyro(P4);
+  triggerPyro(P4);   // parachute at 65% of apogee altitude
 
-  // descent();
-  LED(true,true,true);
-  Serial.println("LANDED");
-  while (digitalRead(button) == LOW) {
+  // ── Landed ──
+  LED(true, true, true);
+  Serial.println(F("LANDED"));
+  while (digitalRead(BUTTON) == LOW) {
     beep(523, 1000);
     beep(392, 1000);
     updatePyros();
   }
-  LED(false,false,false);
+  LED(false, false, false);
   while (true) updatePyros();
 }
