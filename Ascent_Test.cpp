@@ -22,7 +22,7 @@ constexpr float XTUNE  = 0, YTUNE = 0;   // Servo neutral trim (degrees)
 
 // ── PD Controller & TVC ──────────────────────────────────────────────────────
 constexpr float P_GAIN      = 0.3;
-constexpr float D_GAIN      = 0.2;
+constexpr float D_GAIN      = 0.1;
 constexpr float SERVO_X_MULT = 4;
 constexpr float SERVO_Y_MULT = 4;
 constexpr float MAX_TILT     = 5;        // degrees, TVC deflection limit
