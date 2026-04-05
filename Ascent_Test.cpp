@@ -21,7 +21,7 @@ constexpr int SD_CS    = BUILTIN_SDCARD;
 constexpr float XTUNE  = 0, YTUNE = 0;   // Servo neutral trim (degrees)
 
 // ── PD Controller & TVC ──────────────────────────────────────────────────────
-constexpr float P_GAIN      = 0.3;
+constexpr float P_GAIN      = 0.1;
 constexpr float D_GAIN      = 0.1;
 constexpr float SERVO_X_MULT = 4;
 constexpr float SERVO_Y_MULT = 4;
@@ -138,12 +138,11 @@ void sensors() {
 
   mpu6050.update();
 
-  // X axis negated to match rocket mounting orientation
-  float raw_gx  = -(mpu6050.getAngleX() + XTUNE);
-  float raw_gy  =   mpu6050.getAngleY() + YTUNE;
+  float raw_gx  =   mpu6050.getAngleX() + XTUNE;
+  float raw_gy  = -(mpu6050.getAngleY() + YTUNE);
   float raw_gz  =   mpu6050.getAngleZ();
-  float raw_avx = -mpu6050.getGyroX();
-  float raw_avy =  mpu6050.getGyroY();
+  float raw_avx =  mpu6050.getGyroX();
+  float raw_avy = -mpu6050.getGyroY();
 
   gyro_x   = GYRO_ALPHA   * raw_gx  + (1 - GYRO_ALPHA)   * gyro_x;
   gyro_y   = GYRO_ALPHA   * raw_gy  + (1 - GYRO_ALPHA)   * gyro_y;
@@ -175,7 +174,7 @@ void sensors() {
 // ── Emergency ─────────────────────────────────────────────────────────────────
 void emergency() {
   if (!poweredFlight) return;                          // only active during motor burn
-  if (abs(gyro_x) <= 90 && abs(gyro_y) <= 90) return;
+  if (abs(gyro_x) <= 45 && abs(gyro_y) <= 45) return;
 
   servoX.write(90 + XTUNE);
   servoY.write(90 + YTUNE);
@@ -183,7 +182,7 @@ void emergency() {
   LED(true, false, false);
   triggerPyro(P4);   // parachute first in emergency
   delay(1000);
-  triggerPyro(P1);   // then streamer
+  triggerPyro(P1);   // then landing legs
   while (true) {
     updatePyros();
     beep(500, 50);
@@ -336,12 +335,8 @@ void loop() {
   // ── Apogee ──
   beep(659, 100); beep(523, 100); beep(659, 100);
   LED(false, true, true);
-  triggerPyro(P1);   // streamer at 1m below apogee
-
-  // ── Descent ──
-  float chuteAlt = highest_alt * 0.65f;
-  while (altitude > chuteAlt) sensors();
-  triggerPyro(P4);   // parachute at 65% of apogee altitude
+  triggerPyro(P4);   // parachute immediately at apogee
+  triggerPyro(P1);   // landing legs immediately at apogee
 
   // ── Landed ──
   LED(true, true, true);

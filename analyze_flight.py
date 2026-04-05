@@ -39,8 +39,8 @@ apogee_idx = df["Altitude(m)"].idxmax()
 apogee_t   = t[apogee_idx]
 apogee_alt = df["Altitude(m)"][apogee_idx]
 
-# Chute: first point after apogee where altitude < 75% of apogee
-chute_mask = (t > apogee_t) & (df["Altitude(m)"] < apogee_alt * 0.65)
+# Chute: first point after apogee where altitude drops 1 m below apogee (matches firmware)
+chute_mask = (t > apogee_t) & (df["Altitude(m)"] < apogee_alt - 1)
 chute_t    = t[chute_mask].iloc[0] if chute_mask.any() else None
 
 # Emergency: any gyro > 90 deg
@@ -61,7 +61,7 @@ print(f"  Max descent vel   : {df['VertVel(m/s)'].min():.2f} m/s")
 print(f"  Max ascent vel    : {df['VertVel(m/s)'].max():.2f} m/s")
 print(f"  Max tilt (powered): {max_tilt_powered:.1f} deg")
 print(f"  Emergency trigger : {'YES at t=' + f'{emerg_t:.2f}s' if emerg_t is not None else 'No'}")
-print(f"  Chute deploy alt  : {apogee_alt * 0.75:.1f} m  (75% of apogee)")
+print(f"  Chute deploy alt  : {apogee_alt - 1:.1f} m  (apogee − 1 m)")
 print("=" * 45)
 
 # --- Helper: draw event lines on an axis ------------------------------------
@@ -93,7 +93,7 @@ ax1.set_title("Altitude")
 ax1.set_ylabel("m")
 ax1.set_xlabel("Time (s)")
 draw_events(ax1, show_labels=True)
-ax1.axhline(apogee_alt * 0.65, color="blue", linestyle=":", linewidth=1, alpha=0.5, label="Chute trigger alt")
+ax1.axhline(apogee_alt - 1, color="blue", linestyle=":", linewidth=1, alpha=0.5, label="Chute trigger (apogee − 1 m)")
 ax1.legend(fontsize=7)
 
 # 2. Vertical velocity

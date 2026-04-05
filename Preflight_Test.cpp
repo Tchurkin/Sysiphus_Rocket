@@ -36,10 +36,10 @@ constexpr int BLED   = 8;
 // ── Tuning (keep in sync with Ascent_Test.cpp) ──────────────────────────────
 const float  Xtune       = 0,    Ytune      = 0;
 const double ServoXMult  = 4,    ServoYMult = 4;
-const double P_GAIN      = 0.3,  D_GAIN     = 0.2;
+const double P_GAIN      = 0.1, D_GAIN     = 0.1;
 const double burnTime    = 3.45;
 const double avThrust    = 14.34;
-const double rocketWeight= 0.7;
+const double rocketWeight= 0.78;
 const double G           = 9.81;
 const double ignitionDelay = 0.2;
 
@@ -155,11 +155,11 @@ float simVertVel(float t) {
 // ── IMU read (same filter as Ascent_Test.cpp) ─────────────────────────────────
 void readIMU() {
   mpu6050.update();
-  float raw_x = -(mpu6050.getAngleX() + Xtune);
-  float raw_y = mpu6050.getAngleY() + Ytune;
-  float raw_z = mpu6050.getAngleZ();
-  float raw_av_x = -mpu6050.getGyroX();
-  float raw_av_y = mpu6050.getGyroY();
+  float raw_x =   mpu6050.getAngleX() + Xtune;
+  float raw_y = -(mpu6050.getAngleY() + Ytune);
+  float raw_z =   mpu6050.getAngleZ();
+  float raw_av_x =  mpu6050.getGyroX();
+  float raw_av_y = -mpu6050.getGyroY();
 
   const float ga = 0.9, va = 0.9;
   gyro_x   = ga * raw_x   + (1 - ga) * gyro_x;
@@ -337,14 +337,12 @@ void test_flightSim() {
   const float alt_burnout = 0.5f * a_burn * burnTime * burnTime;
   const float t_coast   = v_burnout / G;
   const float alt_apogee = alt_burnout + (v_burnout * v_burnout) / (2.0f * G);
-  const float chuteAlt  = alt_apogee * 0.65f;
-
   Serial.println(F("  Predicted flight profile:"));
   Serial.print(F("    Net burn accel  : ")); Serial.print(a_burn, 2);   Serial.println(F(" m/s²"));
   Serial.print(F("    Burnout alt     : ")); Serial.print(alt_burnout, 1); Serial.println(F(" m"));
   Serial.print(F("    Burnout velocity: ")); Serial.print(v_burnout, 1); Serial.println(F(" m/s"));
   Serial.print(F("    Apogee          : ")); Serial.print(alt_apogee, 1); Serial.println(F(" m"));
-  Serial.print(F("    Chute deploy alt: ")); Serial.print(chuteAlt, 1);  Serial.println(F(" m  (65% apogee)"));
+  Serial.print(F("    Chute deploy alt: ")); Serial.print(alt_apogee - 1, 1); Serial.println(F(" m  (apogee - 1 m)"));
   Serial.println(F("  Running countdown then sim... (sim at x10 speed)"));
   Serial.println();
   runCountdown(5);
@@ -352,7 +350,7 @@ void test_flightSim() {
 
   LED(true, false, true);
 
-  bool fired_P1 = false, fired_P3 = false, fired_P4 = false;
+  bool fired_ignition = false, fired_apogee = false;
   float highest_alt = 0;
   unsigned long simStart = millis();
   float t = 0;
@@ -368,16 +366,15 @@ void test_flightSim() {
     if (alt > highest_alt) highest_alt = alt;
 
     // ── Staging events ───────────────────────────────────────────────────────
-    if (!fired_P1 && t >= ignitionDelay) {
+    if (!fired_ignition && t >= ignitionDelay) {
       Serial.print(F("  t=")); Serial.print(t, 2);
       Serial.println(F("s  → IGNITION (P3) — motor lit"));
       mockPyro(P3, "P3 Ignition");
-      fired_P1 = true;
+      fired_ignition = true;
       LED(true, true, false);
     }
 
-    if (fired_P1 && t >= ignitionDelay + burnTime) {
-      // This block runs once at burnout via a static flag
+    if (fired_ignition && t >= ignitionDelay + burnTime) {
       static bool burnoutLogged = false;
       if (!burnoutLogged) {
         Serial.print(F("  t=")); Serial.print(t, 2);
@@ -388,27 +385,20 @@ void test_flightSim() {
       }
     }
 
-    if (!fired_P3 && alt < highest_alt - 1 && highest_alt > 5) {
+    // Apogee detected + chute fires immediately (matches firmware: alt < highest_alt - 1)
+    if (!fired_apogee && alt < highest_alt - 1 && highest_alt > 5) {
       Serial.print(F("  t=")); Serial.print(t, 2);
       Serial.print(F("s  → APOGEE DETECTED | highest_alt="));
       Serial.print(highest_alt, 1); Serial.println(F(" m"));
       Serial.print(F("  t=")); Serial.print(t, 2);
-      Serial.println(F("s  → STREAMER deploy (P1)"));
-      mockPyro(P1, "P1 Streamer");
-      fired_P3 = true;
+      Serial.print(F("s  → CHUTE deploy (P4) at "));
+      Serial.print(alt, 1); Serial.println(F(" m  (apogee - 1 m)"));
+      mockPyro(P4, "P4 Chute");
+      fired_apogee = true;
       LED(false, true, true);
     }
 
-    if (fired_P3 && !fired_P4 && alt < chuteAlt) {
-      Serial.print(F("  t=")); Serial.print(t, 2);
-      Serial.print(F("s  → CHUTE deploy (P4) at "));
-      Serial.print(alt, 1); Serial.println(F(" m (65% apogee)"));
-      mockPyro(P4, "P4 Chute");
-      fired_P4 = true;
-      LED(true, true, true);
-    }
-
-    if (fired_P4 && alt <= 0) {
+    if (fired_apogee && alt <= 0) {
       Serial.print(F("  t=")); Serial.print(t, 2);
       Serial.println(F("s  → LANDED"));
       break;
@@ -419,11 +409,10 @@ void test_flightSim() {
     if (t - lastPrintT >= 0.5f) {
       lastPrintT = t;
       const char* phase =
-        t < ignitionDelay              ? "pre-ignition" :
+        t < ignitionDelay              ? "pre-ignition " :
         t < ignitionDelay + burnTime   ? "POWERED (TVC)" :
         vel > 0                        ? "coast up     " :
-        !fired_P3                      ? "coast down   " :
-        !fired_P4                      ? "streamer     " :
+        !fired_apogee                  ? "coast down   " :
                                          "chute descent";
       Serial.print(F("      ["));
       Serial.print(phase);
@@ -448,14 +437,14 @@ void test_flightSim() {
 // ─────────────────────────────────────────────────────────────────────────────
 void test_emergency() {
   printHeader(5, "Emergency Logic Test");
-  Serial.println(F("  Injecting fake gyro_x = 91 degrees (above 90 threshold)."));
+  Serial.println(F("  Injecting fake gyro_x = 46 degrees (above 45 threshold)."));
   Serial.println(F("  Verifying emergency response without firing pyros."));
   Serial.println();
 
-  float fake_gyro_x = 91.0f;
+  float fake_gyro_x = 46.0f;
   float fake_gyro_y = 0.0f;
 
-  if (abs(fake_gyro_x) > 90 || abs(fake_gyro_y) > 90) {
+  if (abs(fake_gyro_x) > 45 || abs(fake_gyro_y) > 45) {
     Serial.println(F("  EMERGENCY CONDITION DETECTED ✓"));
     Serial.println(F("  Actions that would execute:"));
     Serial.println(F("    1. Servos -> neutral (90°)"));
@@ -542,17 +531,20 @@ void setup() {
   digitalWrite(P1, LOW); digitalWrite(P2, LOW);
   digitalWrite(P3, LOW); digitalWrite(P4, LOW);
   pinMode(RLED, OUTPUT); pinMode(GLED, OUTPUT); pinMode(BLED, OUTPUT);
+  digitalWrite(RLED, HIGH); digitalWrite(GLED, HIGH); digitalWrite(BLED, HIGH); // all LEDs off
 
   servoX.attach(3);
   servoY.attach(4);
 
   Serial.begin(115200);
-  // Blink blue while waiting for Serial Monitor to open.
-  // Open the monitor, then the startup messages will print.
-  while (!Serial) {
+  // Blink blue — open Serial Monitor, then press button to begin.
+  // (Teensy's 'while (!Serial)' is not reliable — button press is.)
+  while (digitalRead(button) == LOW) {
     digitalWrite(BLED, LOW);  delay(200);
     digitalWrite(BLED, HIGH); delay(200);
   }
+  waitButtonRelease();
+  delay(300);
 
   Wire.begin();
 
