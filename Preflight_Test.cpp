@@ -3,15 +3,17 @@
   ---------------------------------------------------------------
   Runs on the actual hardware. Uses real IMU and servos.
   Pyro channels are BLOCKED — fires are printed to Serial only.
+  Works fully without a Serial Monitor — all feedback via LED + buzzer.
 
-  TESTS (advance with button single-press):
-    1. Servo Center       — both servos to 90°, verify neutral visually
-    2. Servo Sweep        — sweeps ±5° on each axis, verify range and direction
-    3. Live TVC           — real IMU input, servos respond in real time
-                            CRITICAL: tilt rocket and verify servo opposes the lean
-    4. Flight Simulation  — fake altitude profile, verify staging event sequence
-    5. Emergency Test     — injects 91° tilt, verify emergency logic fires correctly
-    6. Sensor Readout     — live stream of all IMU and baro values
+  STARTUP: LED blinks blue → press button to begin (open monitor first if using it)
+
+  TESTS (advance with button press):
+    1. Servo Center       — WHITE  — servos to neutral, verify visually
+    2. Servo Sweep        — BLUE   — sweeps ±5° each axis, 1 beep per step
+    3. Live TVC           — CYAN   — real IMU, servos respond; YELLOW if at limit
+    4. Flight Simulation  — PURPLE — runs staged flight; beeps at each event
+    5. Emergency Test     — RED→GREEN (pass) or RED flash (fail)
+    6. Sensor Readout     — GREEN  — live IMU/baro; beep every 3s to confirm running
 
   Upload this file instead of Ascent_Test.cpp when bench testing.
   ---------------------------------------------------------------
@@ -36,7 +38,7 @@ constexpr int BLED   = 8;
 // ── Tuning (keep in sync with Ascent_Test.cpp) ──────────────────────────────
 const float  Xtune       = 0,    Ytune      = 0;
 const double ServoXMult  = 4,    ServoYMult = 4;
-const double P_GAIN      = 0.1, D_GAIN     = 0.1;
+const double P_GAIN      = 0.05, D_GAIN    = 0.05;
 const double burnTime    = 3.45;
 const double avThrust    = 14.34;
 const double rocketWeight= 0.78;
@@ -184,7 +186,8 @@ void test_servoCenter() {
   Serial.print(F("  Writing ServoY -> ")); Serial.println(ny);
   servoX.write(nx);
   servoY.write(ny);
-  LED(false, true, false);
+  LED(true, true, true);   // WHITE — servos centred
+  beep(440, 100);
   Serial.println(F("  Verify both TVC fins are physically centred, then press button."));
   while (!buttonPressed()) delay(50);
 }
@@ -198,8 +201,10 @@ void test_servoSweep() {
   Serial.println(F("  Format:  axis  tilt(deg)  servo_cmd(deg)"));
   LED(false, false, true);
 
-  // Sweep X positive
+  // Sweep X — LED blue during X sweep
   Serial.println(F("\n  [X] sweeping negative -> positive"));
+  LED(false, false, true);
+  beep(550, 80);
   for (int deg = -5; deg <= 5; deg++) {
     int cmd = (int)(deg * ServoXMult + 90 + Xtune);
     servoX.write(cmd);
@@ -217,8 +222,10 @@ void test_servoSweep() {
 
   delay(500);
 
-  // Sweep Y
+  // Sweep Y — LED cyan during Y sweep
   Serial.println(F("\n  [Y] sweeping negative -> positive"));
+  LED(false, true, true);
+  beep(660, 80);
   for (int deg = -5; deg <= 5; deg++) {
     int cmd = (int)(deg * ServoYMult + 90 + Ytune);
     servoY.write(cmd);
@@ -234,6 +241,9 @@ void test_servoSweep() {
   servoY.write(90 + Ytune);
   Serial.print(F("  [Y] neutral: srv ")); Serial.println((int)(90 + Ytune));
 
+  // Double beep = sweep complete
+  beep(660, 100); delay(80); beep(880, 150);
+  LED(true, true, true);   // WHITE = done
   Serial.println(F("\n  Sweep complete. Press button to continue."));
   while (!buttonPressed()) delay(50);
 }
@@ -315,12 +325,18 @@ void test_liveTVC() {
       if (!xSignOk)         Serial.print(F(" <<WARN: X sign may be wrong>>"));
       if (!ySignOk)         Serial.print(F(" <<WARN: Y sign may be wrong>>"));
       Serial.println();
+
+      // LED: YELLOW if any servo at limit, CYAN otherwise
+      if (xLimited || yLimited) LED(true, true, false);
+      else                      LED(false, true, true);
     }
     delay(10);
   }
 
   servoX.write(90 + Xtune);
   servoY.write(90 + Ytune);
+  beep(440, 80);
+  LED(true, true, true);
   Serial.println(F("\n  Servos centred. Press button to continue."));
   delay(200);
   while (!buttonPressed()) delay(50);
@@ -371,7 +387,8 @@ void test_flightSim() {
       Serial.println(F("s  → IGNITION (P3) — motor lit"));
       mockPyro(P3, "P3 Ignition");
       fired_ignition = true;
-      LED(true, true, false);
+      beep(880, 120);        // high beep = ignition
+      LED(true, true, false); // YELLOW = powered
     }
 
     if (fired_ignition && t >= ignitionDelay + burnTime) {
@@ -381,7 +398,8 @@ void test_flightSim() {
         Serial.print(F("s  → BURNOUT — TVC stops | alt="));
         Serial.print(alt, 1); Serial.println(F(" m"));
         burnoutLogged = true;
-        LED(false, true, false);
+        beep(550, 100);       // mid beep = burnout
+        LED(false, true, false); // GREEN = coasting
       }
     }
 
@@ -395,12 +413,14 @@ void test_flightSim() {
       Serial.print(alt, 1); Serial.println(F(" m  (apogee - 1 m)"));
       mockPyro(P4, "P4 Chute");
       fired_apogee = true;
-      LED(false, true, true);
+      beep(330, 200);         // low beep = chute
+      LED(false, true, true); // CYAN = descending under chute
     }
 
     if (fired_apogee && alt <= 0) {
       Serial.print(F("  t=")); Serial.print(t, 2);
       Serial.println(F("s  → LANDED"));
+      beep(440, 80); beep(660, 80); beep(880, 150); // landed jingle
       break;
     }
 
@@ -452,21 +472,25 @@ void test_emergency() {
     servoY.write(90 + Ytune);
     Serial.print(F("       ServoX written: ")); Serial.println((int)(90 + Xtune));
     Serial.print(F("       ServoY written: ")); Serial.println((int)(90 + Ytune));
-    Serial.println(F("    2. LED -> RED"));
-    LED(true, false, false);
-    Serial.println(F("    3. Deploy parachute (P4)"));
+    Serial.println(F("    2. Deploy parachute (P4)"));
     mockPyro(P4, "P4 Chute (emergency)");
     delay(500);
-    Serial.println(F("    4. Deploy streamer (P1)"));
-    mockPyro(P1, "P1 Streamer (emergency)");
     Serial.println();
     Serial.println(F("  Emergency logic PASSED."));
+    // PASS: red flash → green
+    LED(true, false, false); delay(300);
+    LED(false, true, false); delay(300);
+    beep(523, 80); beep(659, 80); beep(784, 150);
   } else {
     Serial.println(F("  ERROR: Emergency condition NOT detected — check threshold logic!"));
-    LED(true, false, false);
+    // FAIL: rapid red flashes
+    for (int i = 0; i < 6; i++) {
+      LED(true, false, false); delay(150);
+      LED(false, false, false); delay(150);
+    }
+    beep(200, 500);
   }
 
-  beep(880, 100); beep(660, 200);
   Serial.println(F("  Press button to continue."));
   while (!buttonPressed()) delay(50);
 }
@@ -479,12 +503,19 @@ void test_sensorReadout() {
   Serial.println(F("  Live sensor values at 5 Hz. Tilt, move, and verify responses."));
   Serial.println(F("  Press button to exit.\n"));
 
-  LED(false, true, false);
+  LED(false, true, false);   // GREEN = sensor readout active
   unsigned long lastPrint = 0;
+  unsigned long lastBeep  = 0;
   int rowCount = 0;
 
   while (!buttonPressed()) {
     mpu6050.update();
+
+    // Beep every 3 s so you know it's still running without a monitor
+    if (millis() - lastBeep > 3000) {
+      beep(440, 30);
+      lastBeep = millis();
+    }
 
     if (millis() - lastPrint < 200) { delay(5); continue; }
     lastPrint = millis();
