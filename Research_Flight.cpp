@@ -16,9 +16,8 @@
     Trials: 1x per condition per controller (0° and 15° shared with Exp A)
     NOTE: set INJECTED_DELAY_MS = 0 for all Exp B flights
 
-  RUNTIME CONTROLLER SELECTION (at boot, before arm):
-    Short press  = cycle   PD (BLUE) → PID (CYAN) → LQR (PURPLE)
-    Hold 1.5s    = confirm → enter arm sequence
+  PRE-LAUNCH SEQUENCE:
+    Boot → pad angle indicator → ARM (5 rapid presses) → countdown → ignite
 
   PAD ANGLE INDICATOR (after arm, before countdown):
     GREEN  = tilt < 5°   — vertical / near-vertical
@@ -47,12 +46,13 @@
 #include <Adafruit_BMP280.h>
 
 // ── Experiment Config (set before each upload) ────────────────────────────────
-// Experiment A: set TARGET_ANGLE = 15, vary INJECTED_DELAY_MS
-//   Delay values: 0, 20, 40, 60, 80, 100 (ms)
-// Experiment B: set INJECTED_DELAY_MS = 0, vary TARGET_ANGLE
-//   Angle values: 0, 5, 10, 15, 20 (degrees)
-constexpr float INJECTED_DELAY_MS = 0;    // ms  — Exp A variable
-constexpr float TARGET_ANGLE      = 15.0; // deg — Exp B variable / Exp A fixed
+// ACTIVE_CONTROLLER  — pick one: CTRL_PD, CTRL_PID, CTRL_LQR
+// INJECTED_DELAY_MS  — Exp A variable  (0, 20, 40, 60, 80, 100)
+// TARGET_ANGLE       — physical launch-rod angle (deg)
+//                      Exp A: always 15°   |   Exp B: 0, 5, 10, 15, 20°
+#define              ACTIVE_CONTROLLER   CTRL_PD
+constexpr float      INJECTED_DELAY_MS = 0;    // ms
+constexpr float      TARGET_ANGLE      = 15.0; // deg
 
 // ── Pins ──────────────────────────────────────────────────────────────────────
 constexpr int BUTTON = 14;
@@ -231,22 +231,32 @@ void logData() {
 
 // ── Sensors ───────────────────────────────────────────────────────────────────
 void sensors() {
-  static unsigned long prevTime = millis();
+  static unsigned long prevTime  = millis();
+  static unsigned long angleTime = millis();
   static float prev_alt = 0;
 
   mpu6050.update();
 
-  float raw_gx  =  mpu6050.getAngleX() + XTUNE;
-  float raw_gy  = -(mpu6050.getAngleY() + YTUNE);
-  float raw_gz  =   mpu6050.getAngleZ();
   float raw_avx =   mpu6050.getGyroX();
   float raw_avy =  -mpu6050.getGyroY();
+  ang_vel_x = ANGVEL_ALPHA * raw_avx + (1 - ANGVEL_ALPHA) * ang_vel_x;
+  ang_vel_y = ANGVEL_ALPHA * raw_avy + (1 - ANGVEL_ALPHA) * ang_vel_y;
 
-  gyro_x    = GYRO_ALPHA   * raw_gx  + (1 - GYRO_ALPHA)   * gyro_x;
-  gyro_y    = GYRO_ALPHA   * raw_gy  + (1 - GYRO_ALPHA)   * gyro_y;
-  gyro_z    = GYRO_ALPHA   * raw_gz  + (1 - GYRO_ALPHA)   * gyro_z;
-  ang_vel_x = ANGVEL_ALPHA * raw_avx + (1 - ANGVEL_ALPHA)  * ang_vel_x;
-  ang_vel_y = ANGVEL_ALPHA * raw_avy + (1 - ANGVEL_ALPHA)  * ang_vel_y;
+  // Angle source switches on flight phase:
+  //   Powered — pure gyro integration. Accelerometer reads thrust+gravity
+  //             combined and cannot serve as a tilt reference under thrust.
+  //   Coast   — complementary filter uses gravity to correct long-term drift.
+  unsigned long angleNow = millis();
+  float dt = (angleNow - angleTime) / 1000.0f;
+  angleTime = angleNow;
+  if (poweredFlight && dt > 0 && dt < 0.1f) {
+    gyro_x += ang_vel_x * dt;
+    gyro_y += ang_vel_y * dt;
+  } else {
+    gyro_x = GYRO_ALPHA * ( mpu6050.getAngleX() + XTUNE) + (1 - GYRO_ALPHA) * gyro_x;
+    gyro_y = GYRO_ALPHA * -(mpu6050.getAngleY() + YTUNE) + (1 - GYRO_ALPHA) * gyro_y;
+    gyro_z = GYRO_ALPHA *   mpu6050.getAngleZ()          + (1 - GYRO_ALPHA) * gyro_z;
+  }
 
   accel_x = mpu6050.getAccX() * G;
   accel_y = mpu6050.getAccY() * G;
@@ -364,56 +374,26 @@ bool buttonCount() {
   return pressCount > PRESSES_REQD;
 }
 
-// ── Controller Selection ──────────────────────────────────────────────────────
-// Short press cycles PD→PID→LQR. Hold 1.5s to confirm.
-void selectController() {
-  Serial.println(F("\nCONTROLLER SELECT"));
-  Serial.println(F("  Short press = cycle   PD(BLUE) / PID(CYAN) / LQR(PURPLE)"));
-  Serial.println(F("  Hold 1.5s   = confirm"));
-
-  activeController = CTRL_PD;
-  LED(false, false, true);   // start on BLUE = PD
-  Serial.println(F("  > PD"));
-
-  while (true) {
-    if (digitalRead(BUTTON) == HIGH) {
-      unsigned long pressStart = millis();
-      while (digitalRead(BUTTON) == HIGH) delay(10);
-
-      if (millis() - pressStart >= 1500) {
-        beep(880, 200);
-        Serial.print(F("  Confirmed: ")); Serial.println(ctrlName[activeController]);
-        LED(false, false, false);
-        return;
-      } else {
-        activeController = (ControllerType)((activeController + 1) % 3);
-        beep(440, 50);
-        if (activeController == CTRL_PD)  { LED(false, false, true);  Serial.println(F("  > PD"));  }
-        if (activeController == CTRL_PID) { LED(false, true,  true);  Serial.println(F("  > PID")); }
-        if (activeController == CTRL_LQR) { LED(true,  false, true);  Serial.println(F("  > LQR")); }
-      }
-    }
-    delay(20);
-  }
-}
-
 // ── Pad Angle Indicator ───────────────────────────────────────────────────────
 // Fly-the-ball: guides rocket to TARGET_ANGLE like a carrier landing glideslope.
-//   BLUE  = too vertical  (tilt < TARGET - 1°) — lean rocket away from vertical
+// Tilt is computed from the accelerometer (atan2 of lateral vs vertical g-force)
+// so it reads true 0° when vertical and is independent of gyro calibration state.
+//   BLUE  = below target  (tilt < TARGET - 1°) — tilt rocket more
 //   GREEN = on target     (tilt within ±1° of TARGET_ANGLE)
-//   RED   = too horizontal (tilt > TARGET + 1°) — bring rocket back toward vertical
+//   RED   = past target   (tilt > TARGET + 1°) — tilt rocket back toward vertical
 // Press button when GREEN to lock in angle and start countdown.
 void padAngleIndicator() {
   Serial.print(F("\nPAD ANGLE — target: "));
   Serial.print(TARGET_ANGLE, 1);
   Serial.println(F("°"));
-  Serial.println(F("  BLUE=too vertical  GREEN=on target  RED=too horizontal"));
+  Serial.println(F("  BLUE=below target  GREEN=on target  RED=past target"));
 
   while (true) {
     mpu6050.update();
-    float ax   = mpu6050.getAngleX();
-    float ay   = mpu6050.getAngleY();
-    float tilt = sqrt(ax*ax + ay*ay);
+    float gx   = mpu6050.getAccX();
+    float gy   = mpu6050.getAccY();
+    float gz   = mpu6050.getAccZ();
+    float tilt = atan2f(sqrtf(gx*gx + gy*gy), gz) * 180.0f / M_PI;
     float err  = tilt - TARGET_ANGLE;
 
     if      (err < -1.0f) LED(false, false, true);    // BLUE  — too vertical
@@ -455,19 +435,56 @@ bool countdown() {
 
   Serial.print(F("Controller : ")); Serial.println(ctrlName[activeController]);
   Serial.print(F("Delay (ms) : ")); Serial.println(INJECTED_DELAY_MS);
+  Serial.println(F("Calibrating gyro over countdown — keep rocket still."));
+
+  // Gyro calibration accumulators — sampled over the entire countdown for accuracy
+  float gyroSumX = 0, gyroSumY = 0;
+  int   gyroN    = 0;
+
   for (int i = DURATION; i > 0; i--) {
-    Serial.println(i);
-    if (i > 5) {
-      LED(true, false, false); beep(440, 200); LED(false, false, false); delay(800);
-    } else if (i > 3) {
-      LED(true, false, false); tone(BUZZER, 440); delay(1000);
-    } else if (i == 3) {
-      LED(true, false, true); tone(BUZZER, 880);
-      mpu6050.calcGyroOffsets(true, 0, 0);
-      initial_alt = bmp.readAltitude(SEA_LEVEL_HPA);
-      Serial.print(F("  baseline alt: ")); Serial.println(initial_alt);
-      noTone(BUZZER); LED(false, false, false);
+    // Abort if pad angle drifts >2° from target during countdown
+    mpu6050.update();
+    { float gx = mpu6050.getAccX(), gy = mpu6050.getAccY(), gz = mpu6050.getAccZ();
+      float pad_tilt = atan2f(sqrtf(gx*gx + gy*gy), gz) * 180.0f / M_PI;
+      if (abs(pad_tilt - TARGET_ANGLE) > 2.0f) {
+        noTone(BUZZER);
+        Serial.print(F("ABORT — angle deviated: ")); Serial.print(pad_tilt, 1); Serial.println(F("°"));
+        LED(true, false, false);
+        for (int j = 0; j < 10; j++) { beep(880, 100); delay(100); }
+        LED(false, false, false);
+        return false;
+      }
     }
+
+    Serial.println(i);
+    unsigned long secStart = millis();
+
+    // Per-second audio/visual cue
+    if (i > 5) {
+      LED(true, false, false); beep(440, 200); LED(false, false, false);
+    } else if (i > 2) {
+      LED(true, false, false); tone(BUZZER, 440);
+    }
+
+    // Fill remainder of second with gyro samples (skip last 2 to keep them fast)
+    if (i > 2) {
+      while (millis() - secStart < 1000) {
+        mpu6050.update();
+        gyroSumX += mpu6050.getGyroX();
+        gyroSumY += mpu6050.getGyroY();
+        gyroN++;
+      }
+    }
+    noTone(BUZZER); LED(false, false, false);
+  }
+
+  // Apply countdown-averaged gyro offsets
+  if (gyroN > 0) {
+    float offX = gyroSumX / gyroN, offY = gyroSumY / gyroN;
+    mpu6050.calcGyroOffsets(false, offX, offY);
+    Serial.print(F("  gyro cal (N=")); Serial.print(gyroN);
+    Serial.print(F("): offX=")); Serial.print(offX, 3);
+    Serial.print(F("  offY=")); Serial.println(offY, 3);
   }
 
   // Flush angle integrator
@@ -509,6 +526,8 @@ bool countdown() {
     return false;
   }
 
+  initial_alt = bmp.readAltitude(SEA_LEVEL_HPA);
+  Serial.print(F("  baseline alt: ")); Serial.println(initial_alt);
   Serial.println(F("LAUNCH"));
   triggerPyro(P3);
   return true;
@@ -540,9 +559,12 @@ void setup() {
   mpu6050.begin();
   SD.begin(SD_CS);
 
+  activeController = ACTIVE_CONTROLLER;
+
   Serial.println(F("\n╔══════════════════════════════════╗"));
   Serial.println(F("║  SYSIPHUS RESEARCH FLIGHT v1.0   ║"));
   Serial.println(F("╚══════════════════════════════════╝"));
+  Serial.print(F("Controller  : ")); Serial.println(ctrlName[activeController]);
   Serial.print(F("Delay       : ")); Serial.print(INJECTED_DELAY_MS); Serial.println(F(" ms"));
   Serial.print(F("Target angle: ")); Serial.print(TARGET_ANGLE);      Serial.println(F(" deg"));
 
@@ -551,18 +573,15 @@ void setup() {
 
 // ── Main Loop ─────────────────────────────────────────────────────────────────
 void loop() {
-  // Select controller
-  selectController();
+  // Pad angle indicator
+  padAngleIndicator();
+  delay(500);
 
   // Arm
   LED(true, true, true); delay(500); LED(false, false, false);
   Serial.println(F("ARM — 5 rapid presses"));
   while (!buttonCount()) delay(50);
   beep(880, 150);
-
-  // Pad angle indicator
-  padAngleIndicator();
-  delay(500);
 
   // Countdown + launch abort check
   if (!countdown()) {

@@ -133,22 +133,32 @@ void logData() {
 
 // ── Sensors ───────────────────────────────────────────────────────────────────
 void sensors() {
-  static unsigned long prevTime = millis();
+  static unsigned long prevTime  = millis();
+  static unsigned long angleTime = millis();
   static float prev_alt = 0;
 
   mpu6050.update();
 
-  float raw_gx  =   mpu6050.getAngleX() + XTUNE;
-  float raw_gy  = -(mpu6050.getAngleY() + YTUNE);
-  float raw_gz  =   mpu6050.getAngleZ();
-  float raw_avx =  mpu6050.getGyroX();
-  float raw_avy = -mpu6050.getGyroY();
-
-  gyro_x   = GYRO_ALPHA   * raw_gx  + (1 - GYRO_ALPHA)   * gyro_x;
-  gyro_y   = GYRO_ALPHA   * raw_gy  + (1 - GYRO_ALPHA)   * gyro_y;
-  gyro_z   = GYRO_ALPHA   * raw_gz  + (1 - GYRO_ALPHA)   * gyro_z;
+  float raw_avx =   mpu6050.getGyroX();
+  float raw_avy =  -mpu6050.getGyroY();
   ang_vel_x = ANGVEL_ALPHA * raw_avx + (1 - ANGVEL_ALPHA) * ang_vel_x;
   ang_vel_y = ANGVEL_ALPHA * raw_avy + (1 - ANGVEL_ALPHA) * ang_vel_y;
+
+  // Angle source switches on flight phase:
+  //   Powered — pure gyro integration. Accelerometer reads thrust+gravity
+  //             combined and cannot serve as a tilt reference under thrust.
+  //   Coast   — complementary filter uses gravity to correct long-term drift.
+  unsigned long angleNow = millis();
+  float dt = (angleNow - angleTime) / 1000.0f;
+  angleTime = angleNow;
+  if (poweredFlight && dt > 0 && dt < 0.1f) {
+    gyro_x += ang_vel_x * dt;
+    gyro_y += ang_vel_y * dt;
+  } else {
+    gyro_x = GYRO_ALPHA * ( mpu6050.getAngleX() + XTUNE) + (1 - GYRO_ALPHA) * gyro_x;
+    gyro_y = GYRO_ALPHA * -(mpu6050.getAngleY() + YTUNE) + (1 - GYRO_ALPHA) * gyro_y;
+    gyro_z = GYRO_ALPHA *   mpu6050.getAngleZ()          + (1 - GYRO_ALPHA) * gyro_z;
+  }
 
   accel_x = mpu6050.getAccX() * G;
   accel_y = mpu6050.getAccY() * G;
