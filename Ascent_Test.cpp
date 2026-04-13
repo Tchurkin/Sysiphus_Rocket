@@ -21,10 +21,10 @@ constexpr int SD_CS    = BUILTIN_SDCARD;
 constexpr float XTUNE  = 0, YTUNE = 0;   // Servo neutral trim (degrees)
 
 // ── PD Controller & TVC ──────────────────────────────────────────────────────
-constexpr float P_GAIN      = 0.08;
-constexpr float D_GAIN      = 0.08;
-constexpr float SERVO_X_MULT = 4;
-constexpr float SERVO_Y_MULT = 4;
+constexpr float P_GAIN      = 0.15;
+constexpr float D_GAIN      = 0.1;
+constexpr float SERVO_X_MULT = 8.13;
+constexpr float SERVO_Y_MULT = 4.33;
 constexpr float MAX_TILT     = 5;        // degrees, TVC deflection limit
 
 // ── Motor & Flight Constants ──────────────────────────────────────────────────
@@ -215,7 +215,7 @@ bool buttonCount() {
 }
 
 // ── Countdown & Launch ────────────────────────────────────────────────────────
-void countdown() {
+bool countdown() {
   constexpr int DURATION = 30;
 
   servoX.write(90 + XTUNE);
@@ -248,8 +248,45 @@ void countdown() {
     // i=2, i=1 fall through — calibration already consumed the time
   }
 
+  // Flush the MPU6050 angle integrator — calcGyroOffsets() corrects rate bias
+  // but does NOT reset accumulated angle. Spin update() for 1s with correct
+  // offsets, then zero the EMA state so TVC starts from a clean baseline.
+  unsigned long flush = millis();
+  while (millis() - flush < 1000) mpu6050.update();
+  gyro_x = gyro_y = gyro_z = ang_vel_x = ang_vel_y = 0;
+
+  // Pre-launch sanity check — abort if:
+  //   1. Tilt >45° (bad calibration offset or wrong orientation)
+  //   2. Angular velocity >10 deg/s (gyro drift or movement on pad)
+  for (int i = 0; i < 10; i++) { mpu6050.update(); delay(20); }
+  float check_x   = mpu6050.getAngleX();
+  float check_y   = mpu6050.getAngleY();
+  float check_avx = mpu6050.getGyroX();
+  float check_avy = mpu6050.getGyroY();
+
+  bool bad_tilt = abs(check_x) > 45 || abs(check_y) > 45;
+  bool bad_rate = abs(check_avx) > 10 || abs(check_avy) > 10;
+
+  if (bad_tilt || bad_rate) {
+    Serial.print(F("ABORT — "));
+    if (bad_tilt) {
+      Serial.print(F("tilt: X=")); Serial.print(check_x);
+      Serial.print(F(" Y=")); Serial.print(check_y);
+    }
+    if (bad_rate) {
+      Serial.print(F("  rate: avX=")); Serial.print(check_avx);
+      Serial.print(F(" avY=")); Serial.print(check_avy);
+    }
+    Serial.println();
+    LED(true, false, false);
+    for (int i = 0; i < 10; i++) { beep(880, 100); delay(100); }
+    LED(false, false, false);
+    return false;
+  }
+
   Serial.println(F("LAUNCH"));
   triggerPyro(P3);
+  return true;
 }
 
 // ── TVC ───────────────────────────────────────────────────────────────────────
@@ -257,8 +294,8 @@ void TVC() {
   sensors();
   tiltX = constrain(P_GAIN * gyro_x + D_GAIN * ang_vel_x, -MAX_TILT, MAX_TILT) * SERVO_X_MULT;
   tiltY = constrain(P_GAIN * gyro_y + D_GAIN * ang_vel_y, -MAX_TILT, MAX_TILT) * SERVO_Y_MULT;
-  servoX.write(tiltX + 90 + XTUNE);
-  servoY.write(tiltY + 90 + YTUNE);
+  servoX.write(-tiltX + 90 + XTUNE);
+  servoY.write(-tiltY + 90 + YTUNE);
 }
 
 // ── Descent (disabled — landing legs not yet tested) ─────────────────────────
@@ -314,7 +351,13 @@ void loop() {
   LED(true, true, true); delay(500); LED(false, false, false);
   while (!buttonCount()) delay(50);
   delay(500);
-  countdown();
+  if (!countdown()) {
+    // Abort — red LED, no pyros, wait for button then restart arm sequence
+    LED(true, false, false);
+    while (digitalRead(BUTTON) == LOW) delay(50);
+    LED(false, false, false);
+    return;
+  }
 
   // ── Ascent ──
   unsigned long launchTime = millis();

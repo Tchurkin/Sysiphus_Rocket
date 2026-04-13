@@ -37,8 +37,8 @@ constexpr int BLED   = 8;
 
 // ── Tuning (keep in sync with Ascent_Test.cpp) ──────────────────────────────
 const float  Xtune       = 0,    Ytune      = 0;
-const double ServoXMult  = 4,    ServoYMult = 4;
-const double P_GAIN      = 0.08, D_GAIN    = 0.08;
+const double ServoXMult  = 8.13, ServoYMult = 4.33;
+const double P_GAIN      = 0.15, D_GAIN    = 0.1;
 const double burnTime    = 3.45;
 const double avThrust    = 14.34;
 const double rocketWeight= 0.78;
@@ -94,6 +94,12 @@ void runCountdown(int duration) {
     }
     // i=2, i=1 fall through instantly
   }
+
+  // Flush angle integrator and zero EMA state (same as Ascent_Test.cpp)
+  unsigned long flush = millis();
+  while (millis() - flush < 1000) mpu6050.update();
+  gyro_x = gyro_y = gyro_z = ang_vel_x = ang_vel_y = 0;
+
   Serial.println(F("  [LAUNCH]"));
 }
 
@@ -273,8 +279,8 @@ void test_liveTVC() {
   while (!buttonPressed()) {
     readIMU();
     computeTVC();
-    servoX.write(tiltX + 90 + Xtune);
-    servoY.write(tiltY + 90 + Ytune);
+    servoX.write(-tiltX + 90 + Xtune);
+    servoY.write(-tiltY + 90 + Ytune);
 
     if (millis() - lastPrint > 150) {
       unsigned long now = millis();
