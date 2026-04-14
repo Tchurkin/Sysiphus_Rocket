@@ -101,7 +101,6 @@ constexpr float IGN_DELAY     = 0.2;
 constexpr float SEA_LEVEL_HPA = 1013.25;
 
 // ── Sensor Smoothing ──────────────────────────────────────────────────────────
-constexpr float GYRO_ALPHA   = 0.9;
 constexpr float ANGVEL_ALPHA = 0.9;
 constexpr float VEL_ALPHA    = 0.2;
 
@@ -124,6 +123,7 @@ float ang_vel_x, ang_vel_y;
 float accel_x, accel_y, accel_z;
 float tiltX, tiltY;
 bool  poweredFlight = false;
+bool  inFlight      = false;
 
 // ── PID State ─────────────────────────────────────────────────────────────────
 float         pid_integral_x = 0, pid_integral_y = 0;
@@ -141,7 +141,7 @@ struct {
 
 // ── Research Metrics (logged each cycle) ─────────────────────────────────────
 bool          last_saturated    = false;
-unsigned long last_compute_us   = 0;
+unsigned long last_compute_us   = 0; 
 
 // ── Pyro System ───────────────────────────────────────────────────────────────
 struct PyroChannel { int pin; bool active; unsigned long startTime; };
@@ -242,21 +242,21 @@ void sensors() {
   ang_vel_x = ANGVEL_ALPHA * raw_avx + (1 - ANGVEL_ALPHA) * ang_vel_x;
   ang_vel_y = ANGVEL_ALPHA * raw_avy + (1 - ANGVEL_ALPHA) * ang_vel_y;
 
-  // Angle source switches on flight phase:
-  //   Powered — pure gyro integration. Accelerometer reads thrust+gravity
-  //             combined and cannot serve as a tilt reference under thrust.
-  //   Coast   — complementary filter uses gravity to correct long-term drift.
+  // No sensor fusion — one source at a time:
+  //   Ground: pure accelerometer atan2 (gravity = reliable reference)
+  //   In air: pure gyro integration (accel reads thrust+gravity, unusable)
   unsigned long angleNow = millis();
   float dt = (angleNow - angleTime) / 1000.0f;
   angleTime = angleNow;
-  if (poweredFlight && dt > 0 && dt < 0.1f) {
+  if (inFlight && dt > 0 && dt < 0.1f) {
     gyro_x += ang_vel_x * dt;
     gyro_y += ang_vel_y * dt;
-  } else {
-    gyro_x = GYRO_ALPHA * ( mpu6050.getAngleX() + XTUNE) + (1 - GYRO_ALPHA) * gyro_x;
-    gyro_y = GYRO_ALPHA * -(mpu6050.getAngleY() + YTUNE) + (1 - GYRO_ALPHA) * gyro_y;
-    gyro_z = GYRO_ALPHA *   mpu6050.getAngleZ()          + (1 - GYRO_ALPHA) * gyro_z;
+  } else if (!inFlight) {
+    gyro_x = mpu6050.getAccAngleX();
+    gyro_y = mpu6050.getAccAngleY();
   }
+  // Z uses library integrated gyro (no accel reference for yaw)
+  gyro_z = mpu6050.getGyroAngleZ();
 
   accel_x = mpu6050.getAccX() * G;
   accel_y = mpu6050.getAccY() * G;
@@ -273,6 +273,19 @@ void sensors() {
     prev_alt = altitude;
     prevTime = now;
     logData();
+  }
+
+  // Flight gyro debug — print every 100ms while in air
+  static unsigned long dbgTime = 0;
+  if (inFlight && now - dbgTime >= 100) {
+    dbgTime = now;
+    Serial.print(F("t=")); Serial.print(now);
+    Serial.print(F(" gx=")); Serial.print(gyro_x, 1);
+    Serial.print(F(" gy=")); Serial.print(gyro_y, 1);
+    Serial.print(F(" gz=")); Serial.print(gyro_z, 1);
+    Serial.print(F(" avx=")); Serial.print(ang_vel_x, 1);
+    Serial.print(F(" avy=")); Serial.print(ang_vel_y, 1);
+    Serial.print(F(" alt=")); Serial.println(altitude, 1);
   }
 
   updatePyros();
@@ -435,96 +448,82 @@ bool countdown() {
 
   Serial.print(F("Controller : ")); Serial.println(ctrlName[activeController]);
   Serial.print(F("Delay (ms) : ")); Serial.println(INJECTED_DELAY_MS);
-  Serial.println(F("Calibrating gyro over countdown — keep rocket still."));
 
-  // Gyro calibration accumulators — sampled over the entire countdown for accuracy
-  float gyroSumX = 0, gyroSumY = 0;
-  int   gyroN    = 0;
+  // Gyro calibration: rocket is still on the pad during countdown, so the
+  // integrated gyro angle IS the accumulated drift. Drift / time = bias.
+  float angle_x = 0, angle_y = 0;
+  unsigned long calStart = millis();
+  unsigned long calTime  = calStart;
 
   for (int i = DURATION; i > 0; i--) {
-    // Abort if pad angle drifts >2° from target during countdown
-    mpu6050.update();
-    { float gx = mpu6050.getAccX(), gy = mpu6050.getAccY(), gz = mpu6050.getAccZ();
-      float pad_tilt = atan2f(sqrtf(gx*gx + gy*gy), gz) * 180.0f / M_PI;
-      if (abs(pad_tilt - TARGET_ANGLE) > 2.0f) {
-        noTone(BUZZER);
-        Serial.print(F("ABORT — angle deviated: ")); Serial.print(pad_tilt, 1); Serial.println(F("°"));
-        LED(true, false, false);
-        for (int j = 0; j < 10; j++) { beep(880, 100); delay(100); }
-        LED(false, false, false);
-        return false;
-      }
-    }
-
     Serial.println(i);
     unsigned long secStart = millis();
 
-    // Per-second audio/visual cue
     if (i > 5) {
       LED(true, false, false); beep(440, 200); LED(false, false, false);
     } else if (i > 2) {
       LED(true, false, false); tone(BUZZER, 440);
     }
 
-    // Fill remainder of second with gyro samples (skip last 2 to keep them fast)
     if (i > 2) {
+      calTime = millis();   // reset after beep() so first dt is valid
       while (millis() - secStart < 1000) {
+        unsigned long prev = calTime;
         mpu6050.update();
-        gyroSumX += mpu6050.getGyroX();
-        gyroSumY += mpu6050.getGyroY();
-        gyroN++;
+        calTime = millis();
+        float dt = (calTime - prev) / 1000.0f;
+        if (dt > 0 && dt < 0.1f) {
+          angle_x += mpu6050.getGyroX() * dt;
+          angle_y += mpu6050.getGyroY() * dt;
+        }
       }
     }
     noTone(BUZZER); LED(false, false, false);
   }
 
-  // Apply countdown-averaged gyro offsets
-  if (gyroN > 0) {
-    float offX = gyroSumX / gyroN, offY = gyroSumY / gyroN;
-    mpu6050.calcGyroOffsets(false, offX, offY);
-    Serial.print(F("  gyro cal (N=")); Serial.print(gyroN);
-    Serial.print(F("): offX=")); Serial.print(offX, 3);
-    Serial.print(F("  offY=")); Serial.println(offY, 3);
-  }
+  // Average rate over the countdown = gyro bias
+  float elapsed = (calTime - calStart) / 1000.0f;
+  if (elapsed < 1) elapsed = 28.0f;
+  float offX = angle_x / elapsed;
+  float offY = angle_y / elapsed;
+  mpu6050.setGyroOffsets(offX, offY, 0.0f);
 
-  // Flush angle integrator
-  unsigned long flush = millis();
-  while (millis() - flush < 1000) mpu6050.update();
-  gyro_x = gyro_y = gyro_z = ang_vel_x = ang_vel_y = 0;
+  Serial.print(F("Gyro drift angle: X=")); Serial.print(angle_x, 2);
+  Serial.print(F("  Y=")); Serial.println(angle_y, 2);
+  Serial.print(F("Offset (dps): X=")); Serial.print(offX, 3);
+  Serial.print(F("  Y=")); Serial.println(offY, 3);
 
-  // Reset PID integrator and delay buffer
-  pid_integral_x = pid_integral_y = 0;
-  pid_last_t = millis();
-  delayBuf.head = delayBuf.count = 0;
+  // Refresh sensor data with new offsets applied
+  for (int i = 0; i < 10; i++) { mpu6050.update(); delay(10); }
 
-  // Pre-launch sanity check — abort if:
-  //   1. Tilt >45° (physically wrong orientation or bad calibration offset)
-  //   2. Angular velocity >10 deg/s (gyro drift or rocket being disturbed on pad)
-  for (int i = 0; i < 10; i++) { mpu6050.update(); delay(20); }
-  float check_x  = mpu6050.getAngleX();
-  float check_y  = mpu6050.getAngleY();
-  float check_avx = mpu6050.getGyroX();
-  float check_avy = mpu6050.getGyroY();
+  // Abort — atan angle ±2° off target OR angular rate > 10 dps
+  float gx = mpu6050.getAccX(), gy = mpu6050.getAccY(), gz = mpu6050.getAccZ();
+  float tilt = atan2f(sqrtf(gx*gx + gy*gy), gz) * 180.0f / M_PI;
+  float rate_x = mpu6050.getGyroX(), rate_y = mpu6050.getGyroY();
+  bool bad_angle = abs(tilt - TARGET_ANGLE) > 2.0f;
+  bool bad_rate  = abs(rate_x) > 10.0f || abs(rate_y) > 10.0f;
 
-  bool bad_tilt = abs(check_x) > 45 || abs(check_y) > 45;
-  bool bad_rate = abs(check_avx) > 10 || abs(check_avy) > 10;
-
-  if (bad_tilt || bad_rate) {
+  if (bad_angle || bad_rate) {
     Serial.print(F("ABORT — "));
-    if (bad_tilt) {
-      Serial.print(F("tilt: X=")); Serial.print(check_x);
-      Serial.print(F(" Y=")); Serial.print(check_y);
-    }
-    if (bad_rate) {
-      Serial.print(F("  rate: avX=")); Serial.print(check_avx);
-      Serial.print(F(" avY=")); Serial.print(check_avy);
-    }
+    if (bad_angle) { Serial.print(F("angle=")); Serial.print(tilt, 1); Serial.print(F("° ")); }
+    if (bad_rate)  { Serial.print(F("rate=")); Serial.print(rate_x, 1); Serial.print(F(",")); Serial.print(rate_y, 1); Serial.print(F(" dps")); }
     Serial.println();
     LED(true, false, false);
-    for (int i = 0; i < 10; i++) { beep(880, 100); delay(100); }
+    for (int j = 0; j < 10; j++) { beep(880, 100); delay(100); }
     LED(false, false, false);
     return false;
   }
+
+  // Initialize angle state from atan ground truth — gyro integration
+  // will continue from this point once inFlight goes true
+  mpu6050.update();
+  gyro_x = mpu6050.getAccAngleX();
+  gyro_y = mpu6050.getAccAngleY();
+  gyro_z = 0;
+  ang_vel_x = ang_vel_y = 0;
+  pid_integral_x = pid_integral_y = 0;
+  pid_last_t = millis();
+  delayBuf.head = delayBuf.count = 0;
 
   initial_alt = bmp.readAltitude(SEA_LEVEL_HPA);
   Serial.print(F("  baseline alt: ")); Serial.println(initial_alt);
@@ -595,6 +594,7 @@ void loop() {
   unsigned long launchTime = millis();
   LED(true, true, false);
   poweredFlight = true;
+  inFlight = true;
   while (altitude > highest_alt - 1) {
     if (millis() - launchTime < (BURN_TIME + IGN_DELAY) * 1000) {
       TVC();
@@ -606,6 +606,7 @@ void loop() {
     }
   }
   poweredFlight = false;
+  inFlight = false;
 
   // ── Apogee ──
   beep(659, 100); beep(523, 100); beep(659, 100);

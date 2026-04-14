@@ -36,7 +36,6 @@ constexpr float IGN_DELAY      = 0.2;    // s, motor ignition lag
 constexpr float SEA_LEVEL_HPA  = 1013.25;
 
 // ── Sensor Smoothing ─────────────────────────────────────────────────────────
-constexpr float GYRO_ALPHA    = 0.9;
 constexpr float ANGVEL_ALPHA  = 0.9;
 constexpr float VEL_ALPHA     = 0.2;     // weight on new velocity sample
 
@@ -54,6 +53,7 @@ float ang_vel_x, ang_vel_y;
 float accel_x, accel_y, accel_z;
 float tiltX, tiltY;
 bool  poweredFlight = false;  // true only during motor burn — gates emergency deploy
+bool  inFlight      = false;  // true from launch to apogee — gates angle source
 
 // ── Pyro System ──────────────────────────────────────────────────────────────
 struct PyroChannel { int pin; bool active; unsigned long startTime; };
@@ -144,21 +144,20 @@ void sensors() {
   ang_vel_x = ANGVEL_ALPHA * raw_avx + (1 - ANGVEL_ALPHA) * ang_vel_x;
   ang_vel_y = ANGVEL_ALPHA * raw_avy + (1 - ANGVEL_ALPHA) * ang_vel_y;
 
-  // Angle source switches on flight phase:
-  //   Powered — pure gyro integration. Accelerometer reads thrust+gravity
-  //             combined and cannot serve as a tilt reference under thrust.
-  //   Coast   — complementary filter uses gravity to correct long-term drift.
+  // No sensor fusion — one source at a time:
+  //   Ground: pure accelerometer atan2 (gravity = reliable reference)
+  //   In air: pure gyro integration (accel reads thrust+gravity, unusable)
   unsigned long angleNow = millis();
   float dt = (angleNow - angleTime) / 1000.0f;
   angleTime = angleNow;
-  if (poweredFlight && dt > 0 && dt < 0.1f) {
+  if (inFlight && dt > 0 && dt < 0.1f) {
     gyro_x += ang_vel_x * dt;
     gyro_y += ang_vel_y * dt;
-  } else {
-    gyro_x = GYRO_ALPHA * ( mpu6050.getAngleX() + XTUNE) + (1 - GYRO_ALPHA) * gyro_x;
-    gyro_y = GYRO_ALPHA * -(mpu6050.getAngleY() + YTUNE) + (1 - GYRO_ALPHA) * gyro_y;
-    gyro_z = GYRO_ALPHA *   mpu6050.getAngleZ()          + (1 - GYRO_ALPHA) * gyro_z;
+  } else if (!inFlight) {
+    gyro_x =  atan2f(mpu6050.getAccY(), mpu6050.getAccZ()) * 180.0f / M_PI;
+    gyro_y = -atan2f(mpu6050.getAccX(), mpu6050.getAccZ()) * 180.0f / M_PI;
   }
+  gyro_z = mpu6050.getAngleZ();
 
   accel_x = mpu6050.getAccX() * G;
   accel_y = mpu6050.getAccY() * G;
@@ -373,6 +372,7 @@ void loop() {
   unsigned long launchTime = millis();
   LED(true, true, false);
   poweredFlight = true;
+  inFlight = true;
   while (altitude > highest_alt - 1) {
     if (millis() - launchTime < (BURN_TIME + IGN_DELAY) * 1000) {
       TVC();
@@ -384,6 +384,7 @@ void loop() {
     }
   }
   poweredFlight = false;
+  inFlight = false;
 
   // ── Apogee ──
   beep(659, 100); beep(523, 100); beep(659, 100);
