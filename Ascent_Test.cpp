@@ -21,8 +21,8 @@ constexpr int SD_CS    = BUILTIN_SDCARD;
 constexpr float XTUNE  = 0, YTUNE = 0;   // Servo neutral trim (degrees)
 
 // ── PD Controller & TVC ──────────────────────────────────────────────────────
-constexpr float P_GAIN      = 0.15;
-constexpr float D_GAIN      = 0.1;
+constexpr float P_GAIN      = 0.08;
+constexpr float D_GAIN      = 0.08;
 constexpr float SERVO_X_MULT = 8.13;
 constexpr float SERVO_Y_MULT = 4.33;
 constexpr float MAX_TILT     = 5;        // degrees, TVC deflection limit
@@ -334,8 +334,8 @@ void setup() {
   pinMode(P1, OUTPUT); pinMode(P2, OUTPUT); pinMode(P3, OUTPUT); pinMode(P4, OUTPUT);
   digitalWrite(P1, LOW); digitalWrite(P2, LOW); digitalWrite(P3, LOW); digitalWrite(P4, LOW);
 
-  servoX.attach(3);
-  servoY.attach(4);
+  servoX.attach(4);
+  servoY.attach(3);
   servoX.write(90 + XTUNE);
   servoY.write(90 + YTUNE);
 

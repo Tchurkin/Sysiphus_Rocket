@@ -1,40 +1,39 @@
 /*
-  Research_Flight.cpp — Sysiphus Rocket Control Robustness Research
+  Research_Flight.cpp — Sysiphus Rocket Stability-Boundary Study
   ------------------------------------------------------------------
-  Based on Ascent_Test.cpp. Motor: F15 Estes.
+  Motor: F15 Estes. Fixed proportional–derivative (PD) controller.
 
-  EXPERIMENT A — Actuator Delay
-    Fixed initial condition: 15° (use calibrated wedge on launch rod)
-    Variable: INJECTED_DELAY_MS = 0, 20, 40, 60, 80, 100
-    Question: how does recovery degrade as delay increases?
-    Trials: 3x baseline (0ms), 1x all others, per controller
+  Purpose: experimentally map the stability boundary of a small-scale
+  TVC rocket as a joint function of (1) initial tilt angle, (2) feedback
+  delay, and (3) actuator slew rate. Outcome per flight = RECOVER or
+  DIVERGE (+ failure mode: lag-divergence vs. limit cycle).
 
-  EXPERIMENT B — Initial Condition Recovery
-    Fixed delay: INJECTED_DELAY_MS = 0
-    Variable: launch angle set physically via wedge = 0, 5, 10, 15, 20°
-    Question: what is the maximum recoverable disturbance per controller?
-    Trials: 1x per condition per controller (0° and 15° shared with Exp A)
-    NOTE: set INJECTED_DELAY_MS = 0 for all Exp B flights
+  EXPERIMENT VARIABLES (set before each upload):
+    TARGET_ANGLE        — initial tilt set by physical launch-rod wedge
+                          sweep: 0, 5, 10, 15, 20 deg
+    INJECTED_DELAY_MS   — artificial feedback delay inserted in the
+                          actuator command path
+                          sweep: 0, 20, 40, 60, 80, 100 ms
+    SLEW_RATE_LIMIT_DPS — software-imposed servo slew cap
+                          sweep: 0 (unlimited), 600, 400, 200, 100 dps
 
   PRE-LAUNCH SEQUENCE:
     Boot → pad angle indicator → ARM (5 rapid presses) → countdown → ignite
 
   PAD ANGLE INDICATOR (after arm, before countdown):
-    GREEN  = tilt < 5°   — vertical / near-vertical
-    YELLOW = tilt 5–15°  — intermediate angle
-    RED    = tilt > 15°  — high-angle condition
-    Confirm actual angle from serial log (first GyroX/Y sample after ignition).
-    Press button to proceed once at target angle.
+    GREEN  = |tilt - TARGET_ANGLE| < 1°   on target
+    BLUE   = tilt < TARGET_ANGLE - 1°     too vertical
+    RED    = tilt > TARGET_ANGLE + 1°     too tilted
 
-  FILE NAMING — rename after each flight:
-    Exp A: A_[ctrl]_delay[N]_T[trial].CSV   e.g. A_PD_delay40_T1.CSV
-    Exp B: B_[ctrl]_angle[N]_T1.CSV         e.g. B_LQR_angle10_T1.CSV
+  FILE NAMING — rename RES###.CSV after each flight:
+    angle[N]_delay[N]_slew[N]_T[trial].CSV
+    e.g. angle15_delay40_slew400_T1.CSV
 
-  CSV columns: Time, Controller, DelayMS, Altitude, VertVel,
+  CSV columns: Time, DelayMS, SlewDPS,
+               Altitude, VertVel,
                GyroX, GyroY, GyroZ, AngVelX, AngVelY,
                AccelX, AccelY, AccelZ, ServoX, ServoY,
                Saturated, ComputeTime_us
-  Files named RES000.CSV, RES001.CSV, ...
   ------------------------------------------------------------------
 */
 
@@ -46,13 +45,12 @@
 #include <Adafruit_BMP280.h>
 
 // ── Experiment Config (set before each upload) ────────────────────────────────
-// ACTIVE_CONTROLLER  — pick one: CTRL_PD, CTRL_PID, CTRL_LQR
-// INJECTED_DELAY_MS  — Exp A variable  (0, 20, 40, 60, 80, 100)
-// TARGET_ANGLE       — physical launch-rod angle (deg)
-//                      Exp A: always 15°   |   Exp B: 0, 5, 10, 15, 20°
-#define              ACTIVE_CONTROLLER   CTRL_PD
-constexpr float      INJECTED_DELAY_MS = 0;    // ms
-constexpr float      TARGET_ANGLE      = 15.0; // deg
+// TARGET_ANGLE         — initial tilt, set physically via launch-rod wedge (deg)
+// INJECTED_DELAY_MS    — feedback delay inserted in actuator command path (ms)
+// SLEW_RATE_LIMIT_DPS  — servo slew-rate cap (deg/s); 0 = unlimited
+constexpr float      TARGET_ANGLE        = 0.0;   // deg
+constexpr float      INJECTED_DELAY_MS   = 0;     // ms
+constexpr float      SLEW_RATE_LIMIT_DPS = 0;     // deg/s (servo output rate)
 
 // ── Pins ──────────────────────────────────────────────────────────────────────
 constexpr int BUTTON = 14;
@@ -72,25 +70,9 @@ constexpr float SERVO_X_MULT = 8.13;
 constexpr float SERVO_Y_MULT = 4.33;
 constexpr float MAX_TILT     = 5;      // degrees, nozzle deflection limit
 
-// ── PD Gains ──────────────────────────────────────────────────────────────────
-constexpr float PD_P = 0.15, PD_D = 0.1;
-
-// ── PID Gains ─────────────────────────────────────────────────────────────────
-constexpr float PID_P    = 0.15, PID_I = 0.02, PID_D = 0.1;
-constexpr float PID_IMAX = 10.0;   // anti-windup clamp (deg·s)
-
-// ── LQR Gains ─────────────────────────────────────────────────────────────────
-// Compute offline with scipy before first LQR flight:
-//   import numpy as np
-//   from scipy.linalg import solve_continuous_are
-//   T=14.34; L=0.15; I=0.05   # thrust(N), CG-to-gimbal(m), MOI(kg·m²)
-//   A=np.array([[0,1],[0,0]]); B=np.array([[0],[T*L/I]])
-//   Q=np.diag([1.0, 0.1]); R=np.array([[1.0]])
-//   P=solve_continuous_are(A,B,Q,R); K=(np.linalg.inv(R)@B.T@P).flatten()
-//   print(f"LQR_K_ANGLE={K[0]:.4f}  LQR_K_RATE={K[1]:.4f}")
-// PLACEHOLDER — replace with computed values before flying LQR.
-constexpr float LQR_K_ANGLE = 0.15;
-constexpr float LQR_K_RATE  = 0.10;
+// ── PD Gains (fixed for all flights — this study holds the controller constant
+//              and varies delay, slew rate, and initial tilt only) ────────────
+constexpr float PD_P = 0.08, PD_D = 0.08;
 
 // ── Motor & Flight Constants ──────────────────────────────────────────────────
 constexpr float BURN_TIME     = 3.45;
@@ -103,11 +85,6 @@ constexpr float SEA_LEVEL_HPA = 1013.25;
 // ── Sensor Smoothing ──────────────────────────────────────────────────────────
 constexpr float ANGVEL_ALPHA = 0.9;
 constexpr float VEL_ALPHA    = 0.2;
-
-// ── Controller Type ───────────────────────────────────────────────────────────
-enum ControllerType { CTRL_PD, CTRL_PID, CTRL_LQR };
-ControllerType activeController = CTRL_PD;
-const char* ctrlName[] = { "PD", "PID", "LQR" };
 
 // ── Hardware ──────────────────────────────────────────────────────────────────
 PWMServo        servoX, servoY;
@@ -122,12 +99,23 @@ float gyro_x, gyro_y, gyro_z;
 float ang_vel_x, ang_vel_y;
 float accel_x, accel_y, accel_z;
 float tiltX, tiltY;
+float padAngle_x = 0, padAngle_y = 0;    // atan angle captured at launch
+float gyroRef_x  = 0, gyroRef_y  = 0;    // library gyro angle at launch
 bool  poweredFlight = false;
 bool  inFlight      = false;
 
-// ── PID State ─────────────────────────────────────────────────────────────────
-float         pid_integral_x = 0, pid_integral_y = 0;
-unsigned long pid_last_t = 0;
+// ── Slew-Rate Limiter State ───────────────────────────────────────────────────
+// Tracks the previous rate-limited servo command. Applied AFTER the delay
+// buffer so the limit reflects what the actuator can physically achieve.
+float         slew_last_x = 0, slew_last_y = 0;
+unsigned long slew_last_t = 0;
+
+float applySlewLimit(float target, float &last, float dt) {
+  if (SLEW_RATE_LIMIT_DPS <= 0) { last = target; return target; }
+  float max_delta = SLEW_RATE_LIMIT_DPS * dt;
+  last += constrain(target - last, -max_delta, max_delta);
+  return last;
+}
 
 // ── Actuator Delay Buffer ─────────────────────────────────────────────────────
 // Holds up to 60 commands — enough for 100ms delay at a ~10ms loop rate
@@ -199,7 +187,7 @@ void createUniqueLogFile() {
   logFile = SD.open(logFilename, FILE_WRITE);
   if (logFile) {
     Serial.print(F("Logging to: ")); Serial.println(logFilename);
-    logFile.println(F("Time(ms),Controller,DelayMS,"
+    logFile.println(F("Time(ms),DelayMS,SlewDPS,"
                       "Altitude(m),VertVel(m/s),"
                       "GyroX,GyroY,GyroZ,AngVelX,AngVelY,"
                       "AccelX,AccelY,AccelZ,"
@@ -215,9 +203,9 @@ void logData() {
   if (!logFile) return;
   char buf[176];
   snprintf(buf, sizeof(buf),
-    "%lu,%s,%.0f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%lu",
-    millis(), ctrlName[activeController],
-    INJECTED_DELAY_MS,
+    "%lu,%.0f,%.0f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%lu",
+    millis(),
+    INJECTED_DELAY_MS, SLEW_RATE_LIMIT_DPS,
     altitude, vert_vel,
     gyro_x, gyro_y, gyro_z,
     ang_vel_x, ang_vel_y,
@@ -231,31 +219,26 @@ void logData() {
 
 // ── Sensors ───────────────────────────────────────────────────────────────────
 void sensors() {
-  static unsigned long prevTime  = millis();
-  static unsigned long angleTime = millis();
+  static unsigned long prevTime = millis();
   static float prev_alt = 0;
 
   mpu6050.update();
 
-  float raw_avx =   mpu6050.getGyroX();
-  float raw_avy =  -mpu6050.getGyroY();
+  float raw_avx =  mpu6050.getGyroX();
+  float raw_avy = -mpu6050.getGyroY();   // Y inverted (sensor mounting)
   ang_vel_x = ANGVEL_ALPHA * raw_avx + (1 - ANGVEL_ALPHA) * ang_vel_x;
   ang_vel_y = ANGVEL_ALPHA * raw_avy + (1 - ANGVEL_ALPHA) * ang_vel_y;
 
   // No sensor fusion — one source at a time:
-  //   Ground: pure accelerometer atan2 (gravity = reliable reference)
-  //   In air: pure gyro integration (accel reads thrust+gravity, unusable)
-  unsigned long angleNow = millis();
-  float dt = (angleNow - angleTime) / 1000.0f;
-  angleTime = angleNow;
-  if (inFlight && dt > 0 && dt < 0.1f) {
-    gyro_x += ang_vel_x * dt;
-    gyro_y += ang_vel_y * dt;
-  } else if (!inFlight) {
-    gyro_x = mpu6050.getAccAngleX();
-    gyro_y = mpu6050.getAccAngleY();
+  //   Ground: accel atan2 (gravity = reliable reference)
+  //   In air: library gyro-angle delta from launch snapshot + pad angle
+  if (inFlight) {
+    gyro_x = padAngle_x + (mpu6050.getGyroAngleX() - gyroRef_x);
+    gyro_y = padAngle_y - (mpu6050.getGyroAngleY() - gyroRef_y);   // Y inverted
+  } else {
+    gyro_x =  mpu6050.getAccAngleX();
+    gyro_y = -mpu6050.getAccAngleY();   // Y inverted
   }
-  // Z uses library integrated gyro (no accel reference for yaw)
   gyro_z = mpu6050.getGyroAngleZ();
 
   accel_x = mpu6050.getAccX() * G;
@@ -311,31 +294,10 @@ void emergency() {
   }
 }
 
-// ── Controllers ───────────────────────────────────────────────────────────────
+// ── Controller (fixed PD) ─────────────────────────────────────────────────────
 void computeController(float &outX, float &outY, bool &saturated) {
-  float rawX, rawY;
-
-  if (activeController == CTRL_PD) {
-    rawX = PD_P * gyro_x + PD_D * ang_vel_x;
-    rawY = PD_P * gyro_y + PD_D * ang_vel_y;
-
-  } else if (activeController == CTRL_PID) {
-    unsigned long now = millis();
-    float dt = (now - pid_last_t) / 1000.0f;
-    pid_last_t = now;
-    if (dt > 0 && dt < 0.5f) {
-      pid_integral_x += gyro_x * dt;
-      pid_integral_y += gyro_y * dt;
-    }
-    pid_integral_x = constrain(pid_integral_x, -PID_IMAX, PID_IMAX);  // anti-windup
-    pid_integral_y = constrain(pid_integral_y, -PID_IMAX, PID_IMAX);
-    rawX = PID_P * gyro_x + PID_I * pid_integral_x + PID_D * ang_vel_x;
-    rawY = PID_P * gyro_y + PID_I * pid_integral_y + PID_D * ang_vel_y;
-
-  } else {   // LQR: u = -K*x, x = [angle, angular_rate]
-    rawX = LQR_K_ANGLE * gyro_x + LQR_K_RATE * ang_vel_x;
-    rawY = LQR_K_ANGLE * gyro_y + LQR_K_RATE * ang_vel_y;
-  }
+  float rawX = PD_P * gyro_x + PD_D * ang_vel_x;
+  float rawY = PD_P * gyro_y + PD_D * ang_vel_y;
 
   saturated = (abs(rawX) > MAX_TILT || abs(rawY) > MAX_TILT);
   outX = constrain(rawX, -MAX_TILT, MAX_TILT) * SERVO_X_MULT;
@@ -354,18 +316,24 @@ void TVC() {
   last_saturated  = sat;
   last_compute_us = micros() - t0;
 
+  // Pull the controller output through the delay buffer (if any), then through
+  // the slew-rate limiter, then to the servo. Chain order: controller → delay
+  // → slew → servo mirrors the physical signal path in a rate-limited system.
+  float targetX = cx, targetY = cy;
   if (INJECTED_DELAY_MS > 0) {
     pushServoCmd(cx, cy);
-    float dx = cx, dy = cy;
-    if (popServoCmd(dx, dy)) {
-      servoX.write(-dx + 90 + XTUNE);
-      servoY.write(-dy + 90 + YTUNE);
-    }
-    // Hold neutral while the delay buffer is filling on first loop
-  } else {
-    servoX.write(-cx + 90 + XTUNE);
-    servoY.write(-cy + 90 + YTUNE);
+    if (!popServoCmd(targetX, targetY)) return;   // buffer still filling
   }
+
+  unsigned long now = millis();
+  float dt = (now - slew_last_t) / 1000.0f;
+  slew_last_t = now;
+  if (dt <= 0 || dt > 0.5f) dt = 0.01f;
+  float ax = applySlewLimit(targetX, slew_last_x, dt);
+  float ay = applySlewLimit(targetY, slew_last_y, dt);
+
+  servoX.write(-ax + 90 + XTUNE);
+  servoY.write(-ay + 90 + YTUNE);
 }
 
 // ── Arm ───────────────────────────────────────────────────────────────────────
@@ -446,14 +414,16 @@ bool countdown() {
   servoY.write(90 + YTUNE);
   createUniqueLogFile();
 
-  Serial.print(F("Controller : ")); Serial.println(ctrlName[activeController]);
-  Serial.print(F("Delay (ms) : ")); Serial.println(INJECTED_DELAY_MS);
+  Serial.print(F("Target angle (deg): ")); Serial.println(TARGET_ANGLE);
+  Serial.print(F("Delay (ms)        : ")); Serial.println(INJECTED_DELAY_MS);
+  Serial.print(F("Slew limit (dps)  : ")); Serial.println(SLEW_RATE_LIMIT_DPS);
 
-  // Gyro calibration: rocket is still on the pad during countdown, so the
-  // integrated gyro angle IS the accumulated drift. Drift / time = bias.
-  float angle_x = 0, angle_y = 0;
-  unsigned long calStart = millis();
-  unsigned long calTime  = calStart;
+  // Gyro calibration: rocket is still on pad. Library auto-integrates gyro
+  // on every update(); read start and end angles, drift / time = bias.
+  mpu6050.update();
+  float start_x = mpu6050.getGyroAngleX();
+  float start_y = mpu6050.getGyroAngleY();
+  unsigned long t0 = millis();
 
   for (int i = DURATION; i > 0; i--) {
     Serial.println(i);
@@ -464,32 +434,20 @@ bool countdown() {
     } else if (i > 2) {
       LED(true, false, false); tone(BUZZER, 440);
     }
-
-    if (i > 2) {
-      calTime = millis();   // reset after beep() so first dt is valid
-      while (millis() - secStart < 1000) {
-        unsigned long prev = calTime;
-        mpu6050.update();
-        calTime = millis();
-        float dt = (calTime - prev) / 1000.0f;
-        if (dt > 0 && dt < 0.1f) {
-          angle_x += mpu6050.getGyroX() * dt;
-          angle_y += mpu6050.getGyroY() * dt;
-        }
-      }
-    }
+    while (millis() - secStart < 1000) mpu6050.update();
     noTone(BUZZER); LED(false, false, false);
   }
 
-  // Average rate over the countdown = gyro bias
-  float elapsed = (calTime - calStart) / 1000.0f;
-  if (elapsed < 1) elapsed = 28.0f;
-  float offX = angle_x / elapsed;
-  float offY = angle_y / elapsed;
+  float elapsed = (millis() - t0) / 1000.0f;
+  float drift_x = mpu6050.getGyroAngleX() - start_x;
+  float drift_y = mpu6050.getGyroAngleY() - start_y;
+  float offX = drift_x / elapsed;
+  float offY = drift_y / elapsed;
   mpu6050.setGyroOffsets(offX, offY, 0.0f);
 
-  Serial.print(F("Gyro drift angle: X=")); Serial.print(angle_x, 2);
-  Serial.print(F("  Y=")); Serial.println(angle_y, 2);
+  Serial.print(F("Elapsed: ")); Serial.print(elapsed, 2); Serial.println(F(" s"));
+  Serial.print(F("Drift angle: X=")); Serial.print(drift_x, 2);
+  Serial.print(F("  Y=")); Serial.println(drift_y, 2);
   Serial.print(F("Offset (dps): X=")); Serial.print(offX, 3);
   Serial.print(F("  Y=")); Serial.println(offY, 3);
 
@@ -514,16 +472,20 @@ bool countdown() {
     return false;
   }
 
-  // Initialize angle state from atan ground truth — gyro integration
-  // will continue from this point once inFlight goes true
+  // Snapshot pad angle (atan ground truth) and library gyro angle at launch.
+  // In-flight: gyro_x = padAngle_x + (getGyroAngleX() - gyroRef_x)
   mpu6050.update();
-  gyro_x = mpu6050.getAccAngleX();
-  gyro_y = mpu6050.getAccAngleY();
-  gyro_z = 0;
+  gyro_x      =  mpu6050.getAccAngleX();
+  gyro_y      = -mpu6050.getAccAngleY();   // Y inverted (match sensors())
+  padAngle_x  = gyro_x;
+  padAngle_y  = gyro_y;
+  gyroRef_x   = mpu6050.getGyroAngleX();
+  gyroRef_y   = mpu6050.getGyroAngleY();
+  gyro_z      = 0;
   ang_vel_x = ang_vel_y = 0;
-  pid_integral_x = pid_integral_y = 0;
-  pid_last_t = millis();
   delayBuf.head = delayBuf.count = 0;
+  slew_last_x = slew_last_y = 0;
+  slew_last_t = millis();
 
   initial_alt = bmp.readAltitude(SEA_LEVEL_HPA);
   Serial.print(F("  baseline alt: ")); Serial.println(initial_alt);
@@ -541,31 +503,36 @@ void setup() {
   pinMode(P1, OUTPUT); pinMode(P2, OUTPUT); pinMode(P3, OUTPUT); pinMode(P4, OUTPUT);
   digitalWrite(P1, LOW); digitalWrite(P2, LOW); digitalWrite(P3, LOW); digitalWrite(P4, LOW);
 
-  servoX.attach(3);
-  servoY.attach(4);
-  servoX.write(90 + XTUNE);
-  servoY.write(90 + YTUNE);
-
   Serial.begin(115200);
   Wire.begin();
 
-  if (!bmp.begin(0x76)) { Serial.println(F("BMP280 not found")); while (true); }
+  if (!bmp.begin(0x76) && !bmp.begin(0x77)) {
+    Serial.println(F("BMP280 not found"));
+    while (true);
+  }
   bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,
                   Adafruit_BMP280::SAMPLING_X2,
                   Adafruit_BMP280::SAMPLING_X16,
                   Adafruit_BMP280::FILTER_X16,
                   Adafruit_BMP280::STANDBY_MS_1);
   mpu6050.begin();
+  Wire.setClock(400000);   // 400 kHz I2C after init — higher sample rate
   SD.begin(SD_CS);
 
-  activeController = ACTIVE_CONTROLLER;
+  // Servos init after I2C is up — attaching before Wire.begin() has been
+  // observed to interfere with BMP280 detection on this board.
+  servoX.attach(4);
+  servoY.attach(3);
+  servoX.write(90 + XTUNE);
+  servoY.write(90 + YTUNE);
 
   Serial.println(F("\n╔══════════════════════════════════╗"));
   Serial.println(F("║  SYSIPHUS RESEARCH FLIGHT v1.0   ║"));
   Serial.println(F("╚══════════════════════════════════╝"));
-  Serial.print(F("Controller  : ")); Serial.println(ctrlName[activeController]);
-  Serial.print(F("Delay       : ")); Serial.print(INJECTED_DELAY_MS); Serial.println(F(" ms"));
-  Serial.print(F("Target angle: ")); Serial.print(TARGET_ANGLE);      Serial.println(F(" deg"));
+  Serial.println(F("Fixed PD controller — stability-boundary study"));
+  Serial.print(F("Target angle: ")); Serial.print(TARGET_ANGLE);        Serial.println(F(" deg"));
+  Serial.print(F("Delay       : ")); Serial.print(INJECTED_DELAY_MS);   Serial.println(F(" ms"));
+  Serial.print(F("Slew limit  : ")); Serial.print(SLEW_RATE_LIMIT_DPS); Serial.println(F(" dps (0=unlimited)"));
 
   beep(523, 80); beep(659, 80); beep(784, 120);
 }

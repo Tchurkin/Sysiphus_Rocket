@@ -24,7 +24,7 @@ PWMServo servoX, servoY; // Servo objects for thrust vector control (TVC)
 
 // Constants for TVC control and flight dynamics
 const double ServoXMult = 7, ServoYMult = 7;  // Multipliers for servo angles
-const double P = 0.3, D = 0.2;               // PID controller constants (Proportional and Derivative)
+const double P = 0.08, D = 0.08;             // PID controller constants (Proportional and Derivative)
 const double burnTime = 3.45;                // Rocket motor burn time (seconds)
 const double avThrust = 14.34;              // Average thrust (Newtons)
 const double rocketWeight = 1.2;            // Rocket weight (kilograms)
@@ -55,8 +55,8 @@ void setup() {
   pinMode(LED, OUTPUT);
 
   // Initialize servos
-  servoX.attach(2);
-  servoY.attach(3);
+  servoX.attach(3);
+  servoY.attach(2);
 
   // Start Serial for debugging
   Serial.begin(9600);

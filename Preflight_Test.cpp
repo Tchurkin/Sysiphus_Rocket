@@ -15,6 +15,10 @@
     5. Emergency Test     — RED→GREEN (pass) or RED flash (fail)
     6. Sensor Readout     — GREEN  — live IMU/baro; beep every 3s to confirm running
 
+  Mirrors Research_Flight.cpp: fixed PD controller + configurable feedback
+  delay (INJECTED_DELAY_MS) and actuator slew-rate limit (SLEW_RATE_LIMIT_DPS).
+  Sweep those two on the bench before flight to characterize the boundary.
+
   Upload this file instead of Ascent_Test.cpp when bench testing.
   ---------------------------------------------------------------
 */
@@ -35,15 +39,23 @@ constexpr int RLED   = 6;
 constexpr int GLED   = 7;
 constexpr int BLED   = 8;
 
-// ── Tuning (keep in sync with Ascent_Test.cpp) ──────────────────────────────
+// ── Tuning (keep in sync with Ascent_Test.cpp / Research_Flight.cpp) ────────
 const float  Xtune       = 0,    Ytune      = 0;
 const double ServoXMult  = 8.13, ServoYMult = 4.33;
-const double P_GAIN      = 0.15, D_GAIN    = 0.1;
 const double burnTime    = 3.45;
 const double avThrust    = 14.34;
 const double rocketWeight= 0.78;
 const double G           = 9.81;
 const double ignitionDelay = 0.2;
+
+// ── Experiment Variables (mirror Research_Flight.cpp) ──────────────────────
+// Sweep these on the bench to characterize the stability boundary before flight.
+constexpr float INJECTED_DELAY_MS   = 0;      // ms, feedback delay
+constexpr float SLEW_RATE_LIMIT_DPS = 0;      // deg/s, servo slew cap (0 = unlimited)
+
+// ── PD Gains (fixed) ────────────────────────────────────────────────────────
+constexpr float PD_P     = 0.08, PD_D = 0.08;
+constexpr float MAX_TILT = 5.0;
 
 // ── Hardware ─────────────────────────────────────────────────────────────────
 PWMServo servoX, servoY;
@@ -55,6 +67,43 @@ float gyro_x, gyro_y, gyro_z, ang_vel_x, ang_vel_y;
 float tiltX, tiltY;
 int   testMode = 0;   // increments on button press
 
+// Actuator delay buffer (same structure as Research_Flight.cpp)
+constexpr int DELAY_BUF_SIZE = 60;
+struct {
+  float         x[DELAY_BUF_SIZE], y[DELAY_BUF_SIZE];
+  unsigned long t[DELAY_BUF_SIZE];
+  int head = 0, count = 0;
+} delayBuf;
+
+// Slew-rate limiter state
+float         slew_last_x = 0, slew_last_y = 0;
+unsigned long slew_last_t = 0;
+
+float applySlewLimit(float target, float &last, float dt) {
+  if (SLEW_RATE_LIMIT_DPS <= 0) { last = target; return target; }
+  float max_delta = SLEW_RATE_LIMIT_DPS * dt;
+  last += constrain(target - last, -max_delta, max_delta);
+  return last;
+}
+
+void pushServoCmd(float cx, float cy) {
+  delayBuf.x[delayBuf.head] = cx;
+  delayBuf.y[delayBuf.head] = cy;
+  delayBuf.t[delayBuf.head] = millis();
+  delayBuf.head = (delayBuf.head + 1) % DELAY_BUF_SIZE;
+  if (delayBuf.count < DELAY_BUF_SIZE) delayBuf.count++;
+}
+
+bool popServoCmd(float &cx, float &cy) {
+  if (delayBuf.count == 0) return false;
+  int tail = ((delayBuf.head - delayBuf.count) % DELAY_BUF_SIZE + DELAY_BUF_SIZE) % DELAY_BUF_SIZE;
+  if (millis() - delayBuf.t[tail] < (unsigned long)INJECTED_DELAY_MS) return false;
+  cx = delayBuf.x[tail];
+  cy = delayBuf.y[tail];
+  delayBuf.count--;
+  return true;
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 void LED(bool r, bool g, bool b) {
   digitalWrite(RLED, !r);
@@ -64,40 +113,45 @@ void LED(bool r, bool g, bool b) {
 
 void beep(int freq, int dur) { tone(buzzer, freq); delay(dur); noTone(buzzer); }
 
-// Mirrors the countdown() sequence in Ascent_Test.cpp exactly.
-// Call before any test that needs calibrated gyro + initial altitude.
+// Mirrors countdown() in Research_Flight.cpp: delta-based calibration over
+// the full countdown window. Library auto-integrates gyro angle, so the
+// total angle drift / elapsed time = bias offset. Handles beep gaps correctly.
 float sim_initial_alt = 0;
 void runCountdown(int duration) {
   servoX.write(90 + Xtune);
   servoY.write(90 + Ytune);
+
+  mpu6050.update();
+  float start_x = mpu6050.getGyroAngleX();
+  float start_y = mpu6050.getGyroAngleY();
+  unsigned long t0 = millis();
+
   for (int i = duration; i > 0; i--) {
-    if (i > 5) {
-      Serial.println(i);
-      LED(true, false, false);
-      beep(440, 200);
-      LED(false, false, false);
-      delay(800);
-    } else if (i > 3) {
-      Serial.println(i);
-      LED(true, false, false);
-      tone(buzzer, 440);
-      delay(1000);
-    } else if (i == 3) {
-      Serial.println(i);
-      LED(true, false, true);           // purple = calibrating
-      tone(buzzer, 880);
-      mpu6050.calcGyroOffsets(true, 0, 0);
-      sim_initial_alt = bmp.readAltitude(1013.25);
-      Serial.print(F("  initial_alt: ")); Serial.println(sim_initial_alt);
-      noTone(buzzer);
-      LED(false, false, false);
+    Serial.println(i);
+    unsigned long secStart = millis();
+    if (i > 3) {
+      LED(true, false, false); beep(440, 200); LED(false, false, false);
+    } else {
+      LED(true, false, true); tone(buzzer, 880);   // purple = calibrating
     }
-    // i=2, i=1 fall through instantly
+    while (millis() - secStart < 1000) mpu6050.update();
+    noTone(buzzer); LED(false, false, false);
   }
 
-  // Flush angle integrator and zero EMA state (same as Ascent_Test.cpp)
+  float elapsed = (millis() - t0) / 1000.0f;
+  float offX = (mpu6050.getGyroAngleX() - start_x) / elapsed;
+  float offY = (mpu6050.getGyroAngleY() - start_y) / elapsed;
+  mpu6050.setGyroOffsets(offX, offY, 0.0f);
+
+  Serial.print(F("  offsets (dps): X=")); Serial.print(offX, 3);
+  Serial.print(F("  Y=")); Serial.println(offY, 3);
+
+  sim_initial_alt = bmp.readAltitude(1013.25);
+  Serial.print(F("  initial_alt: ")); Serial.println(sim_initial_alt);
+
+  // Flush cached values with fresh offsets applied
   unsigned long flush = millis();
-  while (millis() - flush < 1000) mpu6050.update();
+  while (millis() - flush < 500) mpu6050.update();
   gyro_x = gyro_y = gyro_z = ang_vel_x = ang_vel_y = 0;
 
   Serial.println(F("  [LAUNCH]"));
@@ -160,14 +214,16 @@ float simVertVel(float t) {
   return v_burnout - G * (t - burnTime);
 }
 
-// ── IMU read (same filter as Ascent_Test.cpp) ─────────────────────────────────
+// ── IMU read — no sensor fusion: accel atan for angle (on ground / bench) ────
+// Matches Research_Flight.cpp ground convention. Live TVC uses atan because
+// the user physically tilts the rocket on the bench.
 void readIMU() {
   mpu6050.update();
-  float raw_x =   mpu6050.getAngleX() + Xtune;
-  float raw_y = -(mpu6050.getAngleY() + Ytune);
-  float raw_z =   mpu6050.getAngleZ();
+  float raw_x    =  mpu6050.getAccAngleX();
+  float raw_y    = -mpu6050.getAccAngleY();   // Y inverted (sensor mounting)
+  float raw_z    =  mpu6050.getGyroAngleZ();
   float raw_av_x =  mpu6050.getGyroX();
-  float raw_av_y = -mpu6050.getGyroY();
+  float raw_av_y = -mpu6050.getGyroY();       // Y inverted
 
   const float ga = 0.9, va = 0.9;
   gyro_x   = ga * raw_x   + (1 - ga) * gyro_x;
@@ -177,9 +233,12 @@ void readIMU() {
   ang_vel_y = va * raw_av_y + (1 - va) * ang_vel_y;
 }
 
+// Fixed PD, matches Research_Flight.cpp
 void computeTVC() {
-  tiltX = constrain(P_GAIN * gyro_x + D_GAIN * ang_vel_x, -5, 5) * ServoXMult;
-  tiltY = constrain(P_GAIN * gyro_y + D_GAIN * ang_vel_y, -5, 5) * ServoYMult;
+  float rawX = PD_P * gyro_x + PD_D * ang_vel_x;
+  float rawY = PD_P * gyro_y + PD_D * ang_vel_y;
+  tiltX = constrain(rawX, -MAX_TILT, MAX_TILT) * ServoXMult;
+  tiltY = constrain(rawY, -MAX_TILT, MAX_TILT) * ServoYMult;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -276,11 +335,31 @@ void test_liveTVC() {
   Serial.println(F("  Angle(°)        AngVel(°/s)     ServoCmd        Status"));
   Serial.println(F("  X       Y       X       Y       X       Y"));
 
+  delayBuf.head = delayBuf.count = 0;
+  slew_last_x = slew_last_y = 0;
+  slew_last_t = millis();
+
   while (!buttonPressed()) {
     readIMU();
     computeTVC();
-    servoX.write(-tiltX + 90 + Xtune);
-    servoY.write(-tiltY + 90 + Ytune);
+
+    // Chain: controller → delay → slew → servo (mirrors Research_Flight.cpp)
+    float targetX = tiltX, targetY = tiltY;
+    bool  writeNow = true;
+    if (INJECTED_DELAY_MS > 0) {
+      pushServoCmd(tiltX, tiltY);
+      writeNow = popServoCmd(targetX, targetY);
+    }
+    if (writeNow) {
+      unsigned long now = millis();
+      float dt = (now - slew_last_t) / 1000.0f;
+      slew_last_t = now;
+      if (dt <= 0 || dt > 0.5f) dt = 0.01f;
+      float ax = applySlewLimit(targetX, slew_last_x, dt);
+      float ay = applySlewLimit(targetY, slew_last_y, dt);
+      servoX.write(-ax + 90 + Xtune);
+      servoY.write(-ay + 90 + Ytune);
+    }
 
     if (millis() - lastPrint > 150) {
       unsigned long now = millis();
@@ -533,11 +612,11 @@ void test_sensorReadout() {
     }
     rowCount++;
 
-    float aX  = mpu6050.getAngleX();
-    float aY  = mpu6050.getAngleY();
-    float aZ  = mpu6050.getAngleZ();
-    float avX = mpu6050.getGyroX();
-    float avY = mpu6050.getGyroY();
+    float aX  =  mpu6050.getAccAngleX();     // atan-based, no fusion
+    float aY  = -mpu6050.getAccAngleY();     // Y inverted
+    float aZ  =  mpu6050.getGyroAngleZ();    // pure gyro integration
+    float avX =  mpu6050.getGyroX();
+    float avY = -mpu6050.getGyroY();         // Y inverted
     float acX = mpu6050.getAccX() * 9.81f;
     float acY = mpu6050.getAccY() * 9.81f;
     float acZ = mpu6050.getAccZ() * 9.81f;
@@ -570,9 +649,6 @@ void setup() {
   pinMode(RLED, OUTPUT); pinMode(GLED, OUTPUT); pinMode(BLED, OUTPUT);
   digitalWrite(RLED, HIGH); digitalWrite(GLED, HIGH); digitalWrite(BLED, HIGH); // all LEDs off
 
-  servoX.attach(3);
-  servoY.attach(4);
-
   Serial.begin(115200);
   // Blink blue — open Serial Monitor, then press button to begin.
   // (Teensy's 'while (!Serial)' is not reliable — button press is.)
@@ -583,13 +659,11 @@ void setup() {
   waitButtonRelease();
   delay(300);
 
+  // I2C + sensors FIRST (BMP280 handshake is fragile at 400kHz and can fail
+  // if servos are attached before Wire.begin())
   Wire.begin();
 
-  // IMU
-  mpu6050.begin();
-
-  // Baro
-  if (!bmp.begin(0x76)) {
+  if (!bmp.begin(0x76) && !bmp.begin(0x77)) {
     Serial.println(F("BMP280 not found — baro tests will be skipped"));
   } else {
     bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,
@@ -599,14 +673,25 @@ void setup() {
                     Adafruit_BMP280::STANDBY_MS_1);
   }
 
-  LED(false, false, false);
+  mpu6050.begin();
+  Wire.setClock(400000);   // bump I2C speed AFTER handshakes
+
+  // Servos last — attaching them before I2C init interferes with BMP280
+  servoX.attach(4);
+  servoY.attach(3);
   servoX.write(90 + Xtune);
   servoY.write(90 + Ytune);
+
+  LED(false, false, false);
 
   Serial.println(F("\n╔══════════════════════════════════╗"));
   Serial.println(F("║   SYSIPHUS PREFLIGHT TEST SUITE  ║"));
   Serial.println(F("╚══════════════════════════════════╝"));
-  Serial.println(F("  PYRO CHANNELS ARE BLOCKED.\n"));
+  Serial.println(F("  PYRO CHANNELS ARE BLOCKED."));
+  Serial.println(F("  Fixed PD controller — stability-boundary study"));
+  Serial.print(F("  Delay     : ")); Serial.print(INJECTED_DELAY_MS);   Serial.println(F(" ms"));
+  Serial.print(F("  Slew limit: ")); Serial.print(SLEW_RATE_LIMIT_DPS); Serial.println(F(" dps (0=unlimited)"));
+  Serial.println();
 
   // Sensor health check
   Serial.println(F("  -- Sensor Check --"));
