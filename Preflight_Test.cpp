@@ -41,7 +41,7 @@ constexpr int BLED   = 8;
 
 // ── Tuning (keep in sync with Ascent_Test.cpp / Research_Flight.cpp) ────────
 const float  Xtune       = 0,    Ytune      = 0;
-const double ServoXMult  = 8.13, ServoYMult = 4.33;
+const double ServoXMult  = 4.33, ServoYMult = 4.33;
 const double burnTime    = 3.45;
 const double avThrust    = 14.34;
 const double rocketWeight= 0.78;

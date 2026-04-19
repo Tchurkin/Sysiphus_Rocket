@@ -66,7 +66,7 @@ constexpr int SD_CS  = BUILTIN_SDCARD;
 
 // ── Tuning ────────────────────────────────────────────────────────────────────
 constexpr float XTUNE        = 0, YTUNE = 0;
-constexpr float SERVO_X_MULT = 8.13;
+constexpr float SERVO_X_MULT = 4.33;
 constexpr float SERVO_Y_MULT = 4.33;
 constexpr float MAX_TILT     = 5;      // degrees, nozzle deflection limit
 
@@ -414,6 +414,13 @@ bool countdown() {
   servoY.write(90 + YTUNE);
   createUniqueLogFile();
 
+  // Capture actual tilt at start of countdown — abort checks against THIS
+  // angle (±5°), not TARGET_ANGLE, in case operator accepted off-target.
+  mpu6050.update();
+  float cdGx = mpu6050.getAccX(), cdGy = mpu6050.getAccY(), cdGz = mpu6050.getAccZ();
+  float countdownAngle = atan2f(sqrtf(cdGx*cdGx + cdGy*cdGy), cdGz) * 180.0f / M_PI;
+
+  Serial.print(F("Countdown angle   : ")); Serial.print(countdownAngle, 1); Serial.println(F(" deg"));
   Serial.print(F("Target angle (deg): ")); Serial.println(TARGET_ANGLE);
   Serial.print(F("Delay (ms)        : ")); Serial.println(INJECTED_DELAY_MS);
   Serial.print(F("Slew limit (dps)  : ")); Serial.println(SLEW_RATE_LIMIT_DPS);
@@ -431,11 +438,13 @@ bool countdown() {
 
     if (i > 5) {
       LED(true, false, false); beep(440, 200); LED(false, false, false);
-    } else if (i > 2) {
-      LED(true, false, false); tone(BUZZER, 440);
+    } else if (i > 3) {
+      LED(true, false, false); tone(BUZZER, 440);       // 5-4: solid red, 440 Hz
+    } else {
+      LED(true, false, true); tone(BUZZER, 880);        // 3-1: purple, high pitch
     }
     while (millis() - secStart < 1000) mpu6050.update();
-    noTone(BUZZER); LED(false, false, false);
+    noTone(BUZZER);
   }
 
   float elapsed = (millis() - t0) / 1000.0f;
@@ -454,16 +463,16 @@ bool countdown() {
   // Refresh sensor data with new offsets applied
   for (int i = 0; i < 10; i++) { mpu6050.update(); delay(10); }
 
-  // Abort — atan angle ±2° off target OR angular rate > 10 dps
+  // Abort — tilt moved ±5° from where countdown started OR angular rate > 10 dps
   float gx = mpu6050.getAccX(), gy = mpu6050.getAccY(), gz = mpu6050.getAccZ();
   float tilt = atan2f(sqrtf(gx*gx + gy*gy), gz) * 180.0f / M_PI;
   float rate_x = mpu6050.getGyroX(), rate_y = mpu6050.getGyroY();
-  bool bad_angle = abs(tilt - TARGET_ANGLE) > 2.0f;
+  bool bad_angle = abs(tilt - countdownAngle) > 5.0f;
   bool bad_rate  = abs(rate_x) > 10.0f || abs(rate_y) > 10.0f;
 
   if (bad_angle || bad_rate) {
     Serial.print(F("ABORT — "));
-    if (bad_angle) { Serial.print(F("angle=")); Serial.print(tilt, 1); Serial.print(F("° ")); }
+    if (bad_angle) { Serial.print(F("angle=")); Serial.print(tilt, 1); Serial.print(F("° vs countdown=")); Serial.print(countdownAngle, 1); Serial.print(F("° ")); }
     if (bad_rate)  { Serial.print(F("rate=")); Serial.print(rate_x, 1); Serial.print(F(",")); Serial.print(rate_y, 1); Serial.print(F(" dps")); }
     Serial.println();
     LED(true, false, false);

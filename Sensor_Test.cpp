@@ -156,7 +156,7 @@ void setup() {
   Serial.begin(115200);
   Wire.begin();
 
-  if (!bmp.begin(0x76)) { Serial.println(F("BMP280 not found")); while (true); }
+  if (!bmp.begin(0x76) && !bmp.begin(0x77)) { Serial.println(F("BMP280 not found")); while (true); }
   bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,
                   Adafruit_BMP280::SAMPLING_X2,
                   Adafruit_BMP280::SAMPLING_X16,
