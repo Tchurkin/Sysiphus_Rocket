@@ -179,6 +179,23 @@ bool popServoCmd(float &cx, float &cy) {
 }
 
 // ── SD Logging ────────────────────────────────────────────────────────────────
+// File stays open for the whole flight. Rows are accumulated in a RAM buffer
+// and flushed to the card in 4 KB chunks (SD blocks are 512 B — larger aligned
+// writes are much faster than dozens of small ones). flushLog() is called on
+// landed + emergency to guarantee the tail of the flight reaches the card.
+constexpr size_t LOG_BUF_SIZE = 4096;
+char   logBuf[LOG_BUF_SIZE];
+size_t logHead = 0;
+
+void flushLog() {
+  if (!logFile) return;
+  if (logHead > 0) {
+    logFile.write((const uint8_t*)logBuf, logHead);
+    logHead = 0;
+  }
+  logFile.flush();
+}
+
 void createUniqueLogFile() {
   int idx = 0;
   do { sprintf(logFilename, "RES%03d.CSV", idx++); }
@@ -192,29 +209,34 @@ void createUniqueLogFile() {
                       "GyroX,GyroY,GyroZ,AngVelX,AngVelY,"
                       "AccelX,AccelY,AccelZ,"
                       "ServoX,ServoY,Saturated,ComputeTime_us"));
-    logFile.close();
+    logFile.flush();   // header survives a brownout before first flush
   } else {
     Serial.println(F("Failed to create log file!"));
   }
 }
 
 void logData() {
-  logFile = SD.open(logFilename, FILE_WRITE);
   if (!logFile) return;
-  char buf[176];
-  snprintf(buf, sizeof(buf),
-    "%lu,%.0f,%.0f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%lu",
+  char row[176];
+  int n = snprintf(row, sizeof(row),
+    "%lu,%.0f,%.0f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%lu\n",
     millis(),
     INJECTED_DELAY_MS, SLEW_RATE_LIMIT_DPS,
     altitude, vert_vel,
     gyro_x, gyro_y, gyro_z,
     ang_vel_x, ang_vel_y,
     accel_x, accel_y, accel_z,
-    constrain(tiltX, -MAX_TILT, MAX_TILT),
-    constrain(tiltY, -MAX_TILT, MAX_TILT),
+    tiltX, tiltY,
     (int)last_saturated, last_compute_us);
-  logFile.println(buf);
-  logFile.close();
+  if (n < 0) return;
+  if (n > (int)sizeof(row)) n = sizeof(row);
+
+  if (logHead + n > LOG_BUF_SIZE) {
+    logFile.write((const uint8_t*)logBuf, logHead);   // big aligned chunk
+    logHead = 0;
+  }
+  memcpy(logBuf + logHead, row, n);
+  logHead += n;
 }
 
 // ── Sensors ───────────────────────────────────────────────────────────────────
@@ -287,6 +309,8 @@ void emergency() {
   triggerPyro(P4);
   delay(1000);
   triggerPyro(P1);
+  flushLog();                  // save the tumble that caused the abort
+  if (logFile) logFile.close();
   while (true) {
     updatePyros();
     beep(500, 50); delay(50);
@@ -332,6 +356,8 @@ void TVC() {
   float ax = applySlewLimit(targetX, slew_last_x, dt);
   float ay = applySlewLimit(targetY, slew_last_y, dt);
 
+  tiltX = ax;   // log what was actually commanded (post-delay, post-slew)
+  tiltY = ay;
   servoX.write(-ax + 90 + XTUNE);
   servoY.write(-ay + 90 + YTUNE);
 }
@@ -591,6 +617,8 @@ void loop() {
   triggerPyro(P1);
 
   // ── Landed ──
+  flushLog();
+  if (logFile) logFile.close();
   LED(true, true, true);
   Serial.println(F("LANDED"));
   while (digitalRead(BUTTON) == LOW) {
